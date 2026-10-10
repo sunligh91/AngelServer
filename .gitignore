@@ -1,0 +1,60 @@
+# ================================================================
+# THIS REPOSITORY CONTAINS CODE ONLY.
+#
+# Game assets, extracted master data, resource indexes and save data
+# MUST NEVER be committed.  They are the publisher's copyrighted work,
+# and each user is expected to generate/hold their own copies.
+# ================================================================
+
+# ---- game client (original binaries AND its asset caches) ----
+/client/
+/angelica/
+/angelica_r/
+**/angelica_Data/
+**/angelica_r_Data/
+**/Caches/
+*.bundle
+
+# ---- extracted / generated game data ----
+masterdata.json
+masterdata.bundle
+catalog.bin
+catalog_r.bin
+catalog_meta.json
+cdn_index.json
+api_types.json
+response_members.json
+entity_members.json
+syncdata_members.json
+datasource_config.json
+
+# ---- resource pools ----
+bundles/
+extra_bundles/
+Image/
+Web/
+blog_txt/
+web_txt/
+web_cache/
+
+# ---- save data (player records) ----
+db/
+db_*/
+*.pre-*
+
+# ---- runtime artefacts ----
+*.log
+LabDump/
+__pycache__/
+*.pyc
+
+# ---- compiled artefacts (the plugin is built outside this repository) ----
+*.dll
+*.pdb
+
+# ---- editors / OS ----
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

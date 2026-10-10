@@ -1,0 +1,21 @@
+AngelServer
+===========
+
+This repository contains SOURCE CODE ONLY.
+
+It provides a local, offline server for a game client that the USER must
+already own.  No part of the game -- executable, data, art, audio, text,
+master data, resource manifest or save data -- is included here, and none
+may be contributed.
+
+If you obtained this project expecting a playable game, you are in the
+wrong place: you need your own copy of the client.  See README.md.
+
+---
+
+AGPL-3.0-or-later applies ONLY to the code authored in this repository.
+It grants no rights whatsoever over any game content, trademark or other
+third-party material, and it cannot be read as doing so.
+
+This project is not affiliated with, endorsed by, or sponsored by the
+game's developer or publisher.
