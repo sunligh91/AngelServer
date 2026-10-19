@@ -41,6 +41,10 @@ web_cache/
 db/
 db_*/
 *.pre-*
+*.bak-*
+*.orig
+*.rej
+*~
 
 # ---- runtime artefacts ----
 *.log

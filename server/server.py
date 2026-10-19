@@ -1,5 +1,30 @@
 
 
+# =============================================================================
+#  ANGELICA local server -- patch level
+#
+#  PATCH_LEVEL  : which cumulative fix bundle this file carries
+#                 1.0 = 2026-10-15 bundle
+#                 1.1 = 2026-10-16 bundle
+#                 1.2 = 2026-10-18 bundle (all of 1.0 + 1.1 + the 10-17 fixes)
+#  PATCH_BASE   : md5 of the untouched 2026-10-13 release this was derived from
+#  PATCH_DATE   : when this level was assembled
+#
+#  Check it with:   runtime\python.exe server\server.py --patch-info
+#  or just start the server; the banner prints "patch level: 1.2".
+# =============================================================================
+PATCH_LEVEL = "1.2"
+PATCH_BASE = "82989482e625db35aecc947426641a71"
+PATCH_DATE = "2026-10-18"
+PATCH_NOTES = (
+    "1.0 set-clear-records / quest-end-marker / quest-end-orbbox",
+    "1.1 web-html / oopart-129-gift / boot-gift / version-dynamic",
+    "1.2 mission-state-reset / demigod-advance / oopart-max-level",
+    "1.2 team-name / read-shampoo / read-synopsis / god-lyric",
+    "1.2 orb-sanitize / premium-orb / pslots-createdat / enhance-param",
+    "1.2 mogu-shampoo-count / fragment-touch",
+)
+
 import os, sys, json, base64, io, time, re, threading, random, traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -77,10 +102,10 @@ def _auto_extra_roots():
 
         cands.append(os.path.join(_sub, 'Caches'))
 
-    # A client folder is recognised by the SHAPE of its contents, not by a
-    # hard-coded product name: the game always ships a single '<something>_Data'
-    # directory next to the executable.  Scanning for that pattern keeps the
-    # search working for any product name (and keeps this source free of them).
+    # Recognise a client folder by the SHAPE of its contents rather than by a
+    # product name: every build ships one '<something>_Data' directory beside
+    # the executable.  Scanning for that pattern also discovers installs whose
+    # folder name we would never have guessed.
     for _nm in ('client_r', 'client', 'r18', 'R18'):
         try:
             for _d in sorted(os.listdir(os.path.join(_pkgroot, _nm))):
@@ -89,8 +114,6 @@ def _auto_extra_roots():
         except Exception:
             pass
 
-    # A normal DMM install: <drive>/dmm/<product>/<product>_Data/Caches.
-    # One level of scanning finds the product folder whatever it is called.
     for _drv in ('C:', 'D:', 'E:', 'F:', 'G:'):
         _dmm = os.path.join(_drv + os.sep, 'dmm')
         try:
@@ -136,6 +159,23 @@ CATALOG_BIN_R = _cb_r if (_cb_r and os.path.exists(_cb_r)) else ''
 CATALOG_H_R   = CDN.get('catalog_h', '') or ('27f3577e92d725f410e27526a0e8d44fcd02dcc8cc984d1d59dc28e644f5eaed')
 
 CATALOG_H_N = CDN.get('catalog_h_n', '86539787d9a1594b41a21ec6eef4a6fc')
+
+# The version response carries the catalog's version token ("H").  The
+# client uses it verbatim when building the catalog URL, so it MUST match
+# whichever catalog file we actually serve -- otherwise the client asks for
+# catalog_r_<version>_<one-hash>.bin while the served bytes are keyed by a
+# different hash, concludes the catalog is stale, and never finishes
+# loading.  Derive it from cdn_index instead of baking in a constant.
+CATALOG_H_PUB = CDN.get('catalog_h') or '27f3577e92d725f410e27526a0e8d44fcd02dcc8cc984d1d59dc28e644f5eaed'
+# The resource/masterdata version strings the client uses.  BOTH are hard
+# inputs to the client's URL builders: ResourceVersion picks the catalog
+# slot, MasterDataVersion is hashed together with the salt in
+# MasterWebData.GenerateFileName to form the masterdata URL.  They must
+# therefore move together with catalog_h -- a stale value here makes the
+# client fetch an older masterdata than the catalog it just downloaded.
+RESOURCE_VERSION = CDN.get('catalog_r') or '1.72.3'
+MASTERDATA_VERSION = CDN.get('masterdata_version') or '2026.0918.1253'
+APP_VERSION = CDN.get('app_version') or '1.72.1'
 BUNDLES     = CDN.get('index', {})
 
 PROFILE_MEMBERS = (
@@ -274,33 +314,15 @@ def _self_profile_entity():
             p['JobLvs'] = _jl
     if not p.get('Sha'):
         p['Sha'] = 1
-    if not p.get('Icon'):
-        _ch = db_get('Chara')
-        _c0 = None
-        if isinstance(_ch, list):
-            for _c in _ch:
-                if isinstance(_c, dict) and _c.get('Id'):
-                    _c0 = str(_c['Id']); break
-        p['Icon'] = _c0 or ''
-
-    _picons = str(p.get('Icon') or '')
-    _pstand = str(p.get('Stand') or '')
-    _powned = owned_item_ids()
-    _pchars = [str(_c.get('Id')) for _c in (db_get('Chara') or [])
-               if isinstance(_c, dict) and _c.get('Id')]
-    if _picons not in _pchars and _pchars:
-        _picons = _pchars[0]
-        p['Icon'] = _picons
-    if _pstand not in _powned:
-        _pno = _picons.split('.')[-1] if '.' in _picons else ''
-        _cands = [c for c in sorted(_powned)
-                  if str(c).startswith('chara_costume.%s.' % _pno)]
-        if not _cands:
-            _cands = [c for c in sorted(_powned) if str(c).startswith('chara_costume.')]
-        if _cands:
-            p['Stand'] = str(_cands[0])
-        elif not _pstand:
-            p['Stand'] = _picons
+    # The card is filled in when a character is granted (see
+    # _set_profile_defaults), so this function only reads.  A legacy fallback
+    # here used to write '' into Icon -- an EMPTY STRING makes the client's
+    # SocialFacade.GetProfileIcon miss every master table and throw, whereas
+    # a missing value (null) is tolerated (official data has Icon=null rows).
+    if p.get('Icon') == '':
+        p['Icon'] = None
+    if p.get('Stand') == '':
+        p['Stand'] = None
     p.setdefault('Sha', 1)
     if stored.get('LoginDay') is not None:
         p['LoginDay'] = stored['LoginDay']
@@ -721,6 +743,121 @@ def _behavior_clean(r):
         r['IsLog'] = bool(r.get('IsLog') or False)
     return r
 
+def _mission_state_reset(kinds):
+
+    # Daily and weekly missions must go back to "not yet received" when the
+    # period rolls over.  _behavior_rollover() already clears the progress
+    # counters in DailyRecords/WeeklyRecords, but the Mission rows themselves
+    # kept State = 3, so the client still drew them as CLEAR! and refused a
+    # second claim.
+    #
+    # State values come from the client, not from guesswork:
+    #   MissionEntity.Create(userId, id, type, MissionState state = 1)
+    #     -> 1 is the value the game itself uses for a fresh mission
+    #     -> 3 is what the server writes once the reward has been handed out
+    #     -> MissionStateExtension.SortNo switches over 0..5, so 1/3 are
+    #        both valid members of a 6-value enum.
+    # Only rows whose id carries the period prefix are touched, so main and
+    # event missions (which do not reset) are never disturbed.
+    try:
+        rows = db_get("Mission")
+        if not isinstance(rows, list):
+            return 0
+        n = 0
+        for m in rows:
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("Id") or "")
+            if not any(mid.startswith(p) for p in kinds):
+                continue
+            if int(m.get("State") or 0) == 3:
+                m["State"] = 1
+                m["Ver"] = int(m.get("Ver") or 0) + 1
+                n += 1
+        if n:
+            db_put("Mission", rows)
+        return n
+    except Exception as e:
+        log("  mission state reset failed:", e)
+        return 0
+
+def _demigod_advance(demigod_id, level, row=None):
+
+    # Record progress for one demigod season and bring the artifact up to the
+    # level the cleared milestone earns.
+    #
+    # WHY UserPossession['demigod_lv'] MATTERS
+    #   masterdata `demigod_level.dg_level.200X_1` lists, per level:
+    #       Lv 1..50 -> UnlockLv 0,  Lv 60 -> UnlockLv 50
+    #   The client unlocks a level when the player's recorded clear is >= that
+    #   entry's UnlockLv.  Nothing else records it -- so without this row the
+    #   season's Lv60 stays locked forever even after clearing Lv50.
+    #
+    # ARTIFACT LEVEL = 1 (on obtain) + number of milestones already passed.
+    #   `demigod.<id>.FragmentsSkillLevel` is "10,20,30,40,50,60" for all nine
+    #   seasons, so clearing Lv50 -> 1 + 5 = 6 and Lv60 -> 1 + 6 = 7 (max).
+    #   The milestones are thresholds you must REACH, not indices.
+    #
+    # Both writes must be echoed through touch(): the client only learns about
+    # them from SyncData, and this endpoint's payload is built from
+    # flush_touched(empty_sync()).
+    row = row or {}
+    try:
+        lv = int(level or 0)
+    except Exception:
+        lv = 0
+    if lv <= 0:
+        return
+
+    # ---- artifact level ----
+    _want = 1
+    try:
+        _marks = [int(x) for x in
+                  str(row.get('FragmentsSkillLevel') or '').split(',')
+                  if str(x).strip()]
+        if _marks:
+            _want = 1 + sum(1 for _need in _marks if lv >= _need)
+    except Exception:
+        _want = max(1, lv // 10 + 1)
+    _frag_ids = [f for f in (row.get('RewardIds') or []) if f]
+    if _frag_ids:
+        _frows = db_get('Fragment')
+        if not isinstance(_frows, list):
+            _frows = []
+        _dirty = False
+        for _fr in _frows:
+            if not isinstance(_fr, dict) or _fr.get('Id') not in _frag_ids:
+                continue
+            if int(_fr.get('Level') or 0) < _want:
+                _fr['Level'] = _want
+                _fr['Ver'] = int(_fr.get('Ver') or 0) + 1
+                _dirty = True
+            touch(_fr.get('Id'), _fr, 'Fragments')
+        if _dirty:
+            db_put('Fragment', _frows)
+            log('    demigod/end %s -> fragment level raised to %d' % (demigod_id, _want))
+
+    # ---- clear record (unlocks the next difficulty tier) ----
+    _rows = db_get('UserPossession')
+    if not isinstance(_rows, list):
+        _rows = []
+    _hit = next((r for r in _rows
+                 if isinstance(r, dict) and r.get('Id') == 'demigod_lv'), None)
+    if _hit is None:
+        _hit = {'UserId': user_id(), 'Id': 'demigod_lv', 'ReadFlag': False,
+                'Records': {}, 'Ver': 0}
+        _rows.append(_hit)
+    _recs = _hit.get('Records')
+    if not isinstance(_recs, dict):
+        _recs = {}
+    if lv > int(_recs.get(demigod_id) or 0):
+        _recs[demigod_id] = lv
+        _hit['Records'] = _recs
+        _hit['Ver'] = int(_hit.get('Ver') or 0) + 1
+        db_put('UserPossession', _rows)
+        touch('demigod_lv', _hit, 'UserPossession')
+        log('    demigod/end %s -> demigod_lv[%s] = %d' % (demigod_id, demigod_id, lv))
+
 def _behavior_rollover(r=None):
 
     if r is None:
@@ -750,6 +887,7 @@ def _behavior_rollover(r=None):
             r['DailyRecords'] = d
         except Exception:
             pass
+        _mission_state_reset(('mission.daily.',))
     week = day - datetime.timedelta(days=day.weekday())
     week_s = week.strftime('%Y/%m/%d %H:%M:%S')
 
@@ -772,6 +910,7 @@ def _behavior_rollover(r=None):
                     changed = True
         except Exception:
             pass
+        _mission_state_reset(('mission.weekly.',))
         _wm['WeekAt'] = week_s
         try:
             db_put('BehaviorMark', _wm)
@@ -1005,6 +1144,104 @@ def _inject_shop_entities(sh):
     except Exception as e:
         log("  shop entity inject failed:", e)
     return sh
+
+
+def _set_profile_defaults(chara_id):
+    # Point the player card at a character, the same way the home screen
+    # already picks one up on the first pull.  A one-time setup (at gacha
+    # time, or at startup for older saves), NOT a per-response fallback --
+    # the official server stores these in Profile.json and the client reads
+    # them as-is.  A costume with ItemId == null is the character's default
+    # outfit and needs no grant.
+    if not chara_id:
+        return []
+    try:
+        cc = master_tables().get('chara_costume') or {}
+        costume = ''
+        for cs in sorted(cc):
+            ent = cc.get(cs)
+            if (isinstance(ent, dict)
+                    and str(ent.get('CharaId') or '') == chara_id
+                    and str(cs).endswith('.1')):
+                costume = str(cs)
+                break
+        rows = db_get('Profile')
+        # Profile.json is an OBJECT holding one {'Profile': {...}} wrapper.
+        # It is stored as [] on a fresh save, so handle the empty-list case
+        # explicitly instead of silently returning.
+        if isinstance(rows, dict):
+            pj = rows
+        elif isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            pj = rows[0]
+        else:
+            pj = {}
+        inner = pj.get('Profile') if isinstance(pj.get('Profile'), dict) else None
+        if not isinstance(inner, dict):
+            inner = {}
+            pj['Profile'] = inner
+        changed = []
+        # Only fill what is missing -- never overwrite a card the player set.
+        if not inner.get('Icon'):
+            inner['Icon'] = chara_id
+            changed.append('Icon=%s' % chara_id)
+        if not inner.get('Stand') and costume:
+            inner['Stand'] = costume
+            changed.append('Stand=%s' % costume)
+        inner.setdefault('Id', user_id())
+        inner.setdefault('Name', '')
+        inner.setdefault('Rank', 1)
+        inner.setdefault('Eff', False)
+        inner.setdefault('Messages', None)
+        inner.setdefault('Supports', None)
+        inner.setdefault('SpaLvs', None)
+        inner.setdefault('JobLvs', None)
+        inner.setdefault('Frame', '')
+        inner.setdefault('Back', '')
+        inner.setdefault('Stamps', {})
+        inner.setdefault('Sha', 0)
+        inner.setdefault('Ver', 0)
+        inner.setdefault('LoginDay', 0)
+        inner.setdefault('Following', 0)
+        inner.setdefault('Follower', 0)
+        inner.setdefault('Angels', 0)
+        inner.setdefault('ArrivalAt', '')
+        inner.setdefault('LoginAt', '')
+        if changed:
+            db_put('Profile', pj)
+            # ALSO push it into this response.  Writing the file alone is not
+            # enough: the client keeps the Profile in UserFacade.<Profile> and
+            # only refreshes it from a response that carries one.  Without this
+            # the slot keeps the OLD value (null on a new save), the client
+            # never re-requests /api/social/profile/get, and the profile page
+            # aborts reading a null ProfileEntity.
+            touch_singleton('Profile', dict(inner))
+            log('    PROFILE-INIT: %s' % ', '.join(changed))
+        return changed
+    except Exception as e:
+        log('    PROFILE-INIT failed:', e)
+        return []
+def seed_profile_card():
+    # Idempotent startup pass: saves made before the gacha hook existed
+    # (or by an older build) still get a valid player card.
+    try:
+        rows = db_get('Chara')
+        chars = [str(c.get('Id')) for c in (rows or [])
+                 if isinstance(c, dict) and c.get('Id')]
+        if not chars:
+            return 0
+        prows = db_get('Profile')
+        inner = None
+        if isinstance(prows, dict) and isinstance(prows.get('Profile'), dict):
+            inner = prows['Profile']
+        elif isinstance(prows, list) and prows and isinstance(prows[0], dict):
+            inner = prows[0].get('Profile')
+        if isinstance(inner, dict) and inner.get('Icon') and inner.get('Stand'):
+            return 0
+        _set_profile_defaults(chars[0])
+        return 1
+    except Exception as e:
+        log('    seed_profile_card failed:', e)
+        return 0
 
 def seed_challenge_missions():
 
@@ -1280,8 +1517,13 @@ _OOPART_PLUS_SHORT = {
     "PlusCritical": "Critical",
 }
 
-def _roll_oopart_plus(plus_id):
+def _roll_oopart_plus(plus_id, times=1, oopart_id=None):
 
+    # Each drop rolls its own set of stats; when several drops arrive at once
+    # (Count > 1) the entity ends up with the per-stat MAXIMUM across all of
+    # them, which is what the player compares against the stored value.  Rolling
+    # once and treating it as the result of N drops capped every stat at a
+    # single roll, so a 25-pull barely moved anything.
     out = {'PlusHitPoint': 0, 'PlusAttack': 0, 'PlusDefence': 0,
            'PlusMagicalDefence': 0, 'PlusAgility': 0, 'PlusCritical': 0}
     row = None
@@ -1296,6 +1538,10 @@ def _roll_oopart_plus(plus_id):
 
         return out
 
+    # NOTE: the oopart's own *Max fields are deliberately NOT used as a filter.
+    # Official samples show AddPlus exceeding them freely (oopart.53 has
+    # DefenceMax 0 but a rolled +96 defence, AgilityMax 6 but +12 agility), so
+    # the roll follows the oopart_plus table's own ranges.
     eligible = []
     for field, kmin, kmax in OOPART_PLUS_STATS:
         try:
@@ -1309,26 +1555,29 @@ def _roll_oopart_plus(plus_id):
         return out
 
     rate = row.get('NumRate')
-    want = len(eligible)
-    if isinstance(rate, list) and rate:
-        _w = []
-        for i, v in enumerate(rate):
-            try:
-                _w.append(max(0, int(v)))
-            except Exception:
-                _w.append(0)
-        if sum(_w) > 0:
-            _tot = sum(_w)
-            _pick = random.randint(1, _tot)
-            _acc = 0
-            for i, w in enumerate(_w):
-                _acc += w
-                if _pick <= _acc:
-                    want = i + 1
-                    break
-        want = max(1, min(want, len(eligible)))
-    for field, lo, hi in random.sample(eligible, want):
-        out[field] = random.randint(lo, hi) if hi > lo else hi
+    for _ in range(max(1, int(times or 1))):
+        want = len(eligible)
+        if isinstance(rate, list) and rate:
+            _w = []
+            for i, v in enumerate(rate):
+                try:
+                    _w.append(max(0, int(v)))
+                except Exception:
+                    _w.append(0)
+            if sum(_w) > 0:
+                _tot = sum(_w)
+                _pick = random.randint(1, _tot)
+                _acc = 0
+                for i, w in enumerate(_w):
+                    _acc += w
+                    if _pick <= _acc:
+                        want = i + 1
+                        break
+            want = max(1, min(want, len(eligible)))
+        for field, lo, hi in random.sample(eligible, want):
+            _v = random.randint(lo, hi) if hi > lo else hi
+            if _v > out[field]:
+                out[field] = _v
 
     for _k, _cap in OOPART_PLUS_CAP.items():
         if int(out.get(_k) or 0) > _cap:
@@ -1342,6 +1591,40 @@ def _oopart_plus_log():
     if d is None:
         d = _OOPART_PLUS_LOG.items = []
     return d
+
+def _oopart_pluses_tail(path, body):
+
+    # Only the endpoints that can hand out an oopart carry a non-null
+    # OopartPluses (quest/end, quest/skip, exchange/change,
+    # mission/receive-multiple); the oopart management endpoints send an empty
+    # LIST, never null.  This is an envelope-level member, so the shaping has to
+    # happen at the response exit rather than inside a handler.
+    _EMPTY = ('/api/oopart/enhance', '/api/oopart/enhance-limit',
+              '/api/oopart/enhance-plus', '/api/oopart/enhance-skill',
+              '/api/oopart/clear-new-oopart')
+    if not isinstance(body, dict):
+        return body
+    _sd = body.get('SyncData')
+    if not isinstance(_sd, dict):
+        _sd = body if 'Ooparts' in body else None
+    if not isinstance(_sd, dict):
+        return body
+    if _sd.get('OopartPluses') is not None:
+        return body
+    if path in _EMPTY:
+        _sd['OopartPluses'] = []
+        return body
+    try:
+        _logged = _oopart_plus_take()
+    except Exception:
+        _logged = []
+    if _logged:
+        _sd['OopartPluses'] = _oopart_pluses_rows(_logged)
+        log('    oopart pluses: %d row(s) attached to %s'
+            % (len(_sd['OopartPluses']), path))
+    elif _sd.get('OopartPluses') is None:
+        _sd['OopartPluses'] = None
+    return body
 
 def _oopart_plus_take():
 
@@ -1407,35 +1690,78 @@ def _apply_truth_replay(payload, mode):
         log("    REPLAY failed: %s" % e)
     return payload
 
+def _pluses_row(oopart_id, entries):
+
+    # AddPlus is the value ROLLED for this drop (the candidate), not the
+    # delta that was applied: the official rows keep AddPlus non-zero even
+    # when nothing improved, and the entity always satisfies
+    # entity.Plus* == max(BefPlus, AddPlus) -- verified on 111/111 values.
+    bef = dict(entries[0].get("BefPlus") or {})
+    add = {}
+    plus_id = None
+    n = 0
+    for _x in entries:
+        for _k, _v in (_x.get("AddPlus") or {}).items():
+            _v = int(_v or 0)
+            if _v > int(add.get(_k) or 0):
+                add[_k] = _v
+        plus_id = _x.get("PlusId")
+        n += int(_x.get("AddCount") or 1)
+    return {
+        "Id": oopart_id,
+        "PlusId": plus_id,
+        "BefPlus": {_OOPART_PLUS_SHORT[s]: int(bef.get(s) or 0)
+                    for s in _OOPART_PLUS_KEYS},
+        "AddPlus": {_OOPART_PLUS_SHORT[s]: int(add.get(s) or 0)
+                    for s in _OOPART_PLUS_KEYS},
+        "AddCount": n,
+    }
+
+def _oopart_pluses_rows(logged):
+
+    # A first acquisition keeps its own row (PlusId=null means "this source
+    # hands out no plus table"), while repeated handouts of an already owned
+    # oopart collapse into one row whose AddCount counts them.  AddPlus is the
+    # value ROLLED for the drop, not the delta applied -- the official rows keep
+    # it non-zero on a no-gain drop, and entity.Plus* == max(BefPlus, AddPlus).
+    _ord = []
+    _grp = {}
+    for _x in logged:
+        _k = _x.get('Id')
+        _g = _grp.get(_k)
+        if _g is None:
+            _g = _grp[_k] = {'new': [], 'sub': []}
+            _ord.append(_k)
+        _g['new' if _x.get('IsNew') else 'sub'].append(_x)
+    rows = []
+    for _k in _ord:
+        _g = _grp[_k]
+        for _x in _g['new']:
+            rows.append(_pluses_row(_k, [_x]))
+        if _g['sub']:
+            rows.append(_pluses_row(_k, _g['sub']))
+    return rows
+
 def _oopart_pluses_sync(sync):
 
     try:
         logged = _oopart_plus_take()
         if not logged:
 
-            if sync.get("Ooparts"):
-                sync["OopartPluses"] = []
+            if sync.get('Ooparts'):
+                sync['OopartPluses'] = []
             return sync
-        rows = []
-        for x in logged:
-            rows.append({
-                "Id": x.get("Id"),
-                "PlusId": x.get("PlusId"),
-                "BefPlus": {_OOPART_PLUS_SHORT[k]: int((x.get("BefPlus") or {}).get(k) or 0)
-                            for k in _OOPART_PLUS_KEYS},
-                "AddPlus": {_OOPART_PLUS_SHORT[k]: int((x.get("AddPlus") or {}).get(k) or 0)
-                            for k in _OOPART_PLUS_KEYS},
-                "AddCount": int(x.get("AddCount") or 1),
-            })
-        sync["OopartPluses"] = rows
+        sync['OopartPluses'] = _oopart_pluses_rows(logged)
     except Exception as e:
-        log("    oopart pluses sync failed: %s" % e)
+        log('    oopart pluses sync failed: %s' % e)
     return sync
 
-def _grant_oopart(oopart_id, plus_id=None):
+
+def _grant_oopart(oopart_id, plus_id=None, count=1):
 
     if not isinstance(oopart_id, str) or not oopart_id.startswith('oopart.'):
         return None
+    _n = max(1, int(count or 1))
     rows = db_get('Oopart')
     if not isinstance(rows, list):
         rows = []
@@ -1443,27 +1769,29 @@ def _grant_oopart(oopart_id, plus_id=None):
         if isinstance(r, dict) and r.get('Id') == oopart_id:
 
             r['Ver'] = int(r.get('Ver') or 0) + 1
-            _np = _roll_oopart_plus(plus_id) if plus_id else {}
+            # One roll per dropped copy, then keep the per-stat maximum.
+            _np = _roll_oopart_plus(plus_id, _n, oopart_id) if plus_id else {}
             _bef = {k: int(r.get(k) or 0) for k in _OOPART_PLUS_KEYS}
+            _add = {}
             for _pk, _pv in (_np or {}).items():
 
                 _capped = min(int(_pv or 0), OOPART_PLUS_CAP.get(_pk, int(_pv or 0)))
+                _add[_pk] = _capped
                 if _capped > int(r.get(_pk) or 0):
                     r[_pk] = _capped
-            _aft = {k: int(r.get(k) or 0) for k in _OOPART_PLUS_KEYS}
-
             _oopart_plus_log().append({
                 'Id': oopart_id,
                 'PlusId': plus_id,
                 'BefPlus': dict(_bef),
-                'AddPlus': {k: _aft[k] - _bef[k] for k in _OOPART_PLUS_KEYS},
-                'AddCount': 1,
+                'AddPlus': {k: int(_add.get(k) or 0) for k in _OOPART_PLUS_KEYS},
+                'AddCount': _n,
+                'IsNew': False,
             })
             touch(oopart_id, r, 'Ooparts')
             db_put('Oopart', rows)
             return r
 
-    plus = _roll_oopart_plus(plus_id)
+    plus = _roll_oopart_plus(plus_id, _n, oopart_id)
     fresh = {'UserId': user_id(), 'Id': oopart_id, 'Level': 1, 'Experience': 0,
              'SkillLevel': 1, 'ReceivedAt': _now_iso(), 'IsNewOopart': True,
              'LimitOver': 0, 'Ver': 0}
@@ -1476,11 +1804,164 @@ def _grant_oopart(oopart_id, plus_id=None):
         'PlusId': plus_id,
         'BefPlus': {k: 0 for k in _OOPART_PLUS_KEYS},
         'AddPlus': {k: int(fresh.get(k) or 0) for k in _OOPART_PLUS_KEYS},
-        'AddCount': 1,
+        'AddCount': _n,
+        'IsNew': True,
     })
     touch(oopart_id, fresh, 'Ooparts')
     db_put('Oopart', rows)
     return fresh
+
+# Decoration items that masterdata gives no obtain source for (only the item
+# table itself mentions them).  Retrieved by a full cross-table scan: 172 rows
+# across item.furniture.* (135), item.illust.* (14), item.bg.* (7),
+# item.clock.* (5), item.effect.* (8) and item.verse_bg.* (1).
+DECO_FREE_IDS = (
+    'item.bg.11', 'item.bg.12', 'item.bg.13', 'item.bg.14', 'item.bg.15', 'item.bg.16',
+    'item.bg.2', 'item.bg.3', 'item.bg.4', 'item.clock.13', 'item.clock.14', 'item.clock.2',
+    'item.clock.3', 'item.clock.5', 'item.effect.11', 'item.effect.12', 'item.effect.14',
+    'item.effect.5', 'item.effect.6', 'item.effect.7', 'item.effect.8', 'item.effect.9',
+    'item.furniture.cafe_chair_10', 'item.furniture.cafe_chair_102',
+    'item.furniture.cafe_chair_14', 'item.furniture.cafe_chair_16',
+    'item.furniture.cafe_chair_17', 'item.furniture.cafe_chair_21',
+    'item.furniture.cafe_chair_22', 'item.furniture.cafe_chair_5',
+    'item.furniture.cafe_chair_6', 'item.furniture.cafe_chair_7',
+    'item.furniture.cafe_chair_9', 'item.furniture.cafe_chest_14',
+    'item.furniture.cafe_chest_16', 'item.furniture.cafe_chest_17',
+    'item.furniture.cafe_chest_5', 'item.furniture.cafe_chest_6',
+    'item.furniture.cafe_chest_7', 'item.furniture.cafe_chest_9',
+    'item.furniture.cafe_desk_10', 'item.furniture.cafe_desk_101',
+    'item.furniture.cafe_desk_14', 'item.furniture.cafe_desk_16',
+    'item.furniture.cafe_desk_17', 'item.furniture.cafe_desk_21',
+    'item.furniture.cafe_desk_22', 'item.furniture.cafe_desk_5', 'item.furniture.cafe_desk_6',
+    'item.furniture.cafe_desk_7', 'item.furniture.cafe_desk_9', 'item.furniture.cafe_floor_10',
+    'item.furniture.cafe_floor_14', 'item.furniture.cafe_floor_16',
+    'item.furniture.cafe_floor_17', 'item.furniture.cafe_floor_21',
+    'item.furniture.cafe_floor_22', 'item.furniture.cafe_floor_5',
+    'item.furniture.cafe_floor_6', 'item.furniture.cafe_floor_7',
+    'item.furniture.cafe_floor_9', 'item.furniture.cafe_sofa1_10',
+    'item.furniture.cafe_sofa1_102', 'item.furniture.cafe_sofa1_14',
+    'item.furniture.cafe_sofa1_16', 'item.furniture.cafe_sofa1_17',
+    'item.furniture.cafe_sofa1_21', 'item.furniture.cafe_sofa1_22',
+    'item.furniture.cafe_sofa1_5', 'item.furniture.cafe_sofa1_6',
+    'item.furniture.cafe_sofa1_7', 'item.furniture.cafe_sofa1_9',
+    'item.furniture.cafe_sofa2_10', 'item.furniture.cafe_sofa2_102',
+    'item.furniture.cafe_sofa2_14', 'item.furniture.cafe_sofa2_16',
+    'item.furniture.cafe_sofa2_17', 'item.furniture.cafe_sofa2_21',
+    'item.furniture.cafe_sofa2_22', 'item.furniture.cafe_sofa2_5',
+    'item.furniture.cafe_sofa2_6', 'item.furniture.cafe_sofa2_7',
+    'item.furniture.cafe_sofa2_9', 'item.furniture.cafe_wall_10',
+    'item.furniture.cafe_wall_14', 'item.furniture.cafe_wall_16',
+    'item.furniture.cafe_wall_17', 'item.furniture.cafe_wall_21',
+    'item.furniture.cafe_wall_22', 'item.furniture.cafe_wall_5', 'item.furniture.cafe_wall_6',
+    'item.furniture.cafe_wall_7', 'item.furniture.cafe_wall_9',
+    'item.furniture.gamecenter_bridge_10', 'item.furniture.gamecenter_bridge_14',
+    'item.furniture.gamecenter_bridge_16', 'item.furniture.gamecenter_bridge_21',
+    'item.furniture.gamecenter_bridge_22', 'item.furniture.gamecenter_bridge_5',
+    'item.furniture.gamecenter_bridge_6', 'item.furniture.gamecenter_bridge_7',
+    'item.furniture.gamecenter_bridge_9', 'item.furniture.gamecenter_floor_10',
+    'item.furniture.gamecenter_floor_14', 'item.furniture.gamecenter_floor_16',
+    'item.furniture.gamecenter_floor_21', 'item.furniture.gamecenter_floor_22',
+    'item.furniture.gamecenter_floor_5', 'item.furniture.gamecenter_floor_6',
+    'item.furniture.gamecenter_floor_7', 'item.furniture.gamecenter_floor_9',
+    'item.furniture.gamecenter_light_10', 'item.furniture.gamecenter_light_14',
+    'item.furniture.gamecenter_light_16', 'item.furniture.gamecenter_light_21',
+    'item.furniture.gamecenter_light_22', 'item.furniture.gamecenter_light_5',
+    'item.furniture.gamecenter_light_6', 'item.furniture.gamecenter_light_7',
+    'item.furniture.gamecenter_light_9', 'item.furniture.garden_fence_10',
+    'item.furniture.garden_fence_14', 'item.furniture.garden_fence_16',
+    'item.furniture.garden_fence_21', 'item.furniture.garden_fence_22',
+    'item.furniture.garden_fence_6', 'item.furniture.garden_fence_9',
+    'item.furniture.garden_flower_10', 'item.furniture.garden_flower_14',
+    'item.furniture.garden_flower_16', 'item.furniture.garden_flower_21',
+    'item.furniture.garden_flower_22', 'item.furniture.garden_flower_6',
+    'item.furniture.garden_flower_9', 'item.furniture.garden_gazebo_14',
+    'item.furniture.garden_gazebo_16', 'item.furniture.garden_gazebo_6',
+    'item.furniture.garden_gazebo_9', 'item.furniture.garden_parasol_10',
+    'item.furniture.garden_parasol_14', 'item.furniture.garden_parasol_16',
+    'item.furniture.garden_parasol_21', 'item.furniture.garden_parasol_22',
+    'item.furniture.garden_parasol_6', 'item.furniture.garden_parasol_9',
+    'item.furniture.garden_street_light_14', 'item.furniture.garden_street_light_16',
+    'item.furniture.garden_street_light_6', 'item.furniture.garden_street_light_9',
+    'item.furniture.garden_swing_14', 'item.furniture.garden_swing_16',
+    'item.furniture.garden_swing_6', 'item.furniture.garden_swing_9',
+    'item.furniture.garden_tent_14', 'item.furniture.garden_tent_16',
+    'item.furniture.garden_tent_6', 'item.furniture.garden_tent_9', 'item.illust.11',
+    'item.illust.12', 'item.illust.13', 'item.illust.14', 'item.illust.16', 'item.illust.17',
+    'item.illust.18', 'item.illust.19', 'item.illust.20', 'item.illust.24', 'item.illust.27',
+    'item.illust.4', 'item.illust.8', 'item.illust.9', 'item.verse_bg.1001',
+)
+
+# Starting weapons / parts / costumes handed to every new save.
+# All three are the COMPLETE masterdata set for their category, which is
+# what the official starter flow ends up owning; a case player would
+# otherwise have to unlock 161 weapons one by one.
+#   chara_weapon           -> 161 rows (every weapon)
+#   item.job_panzer.*      -> 71 rows (every part)
+#   item.costume_<n>_2     -> 29 rows (the alternate outfits)
+STARTER_WEAPON_IDS = (
+    'weapon.1.1', 'weapon.1.2', 'weapon.10.1', 'weapon.10.2', 'weapon.100.1', 'weapon.101.1',
+    'weapon.102.1', 'weapon.103.1', 'weapon.105.1', 'weapon.106.1', 'weapon.107.1',
+    'weapon.108.1', 'weapon.109.1', 'weapon.11.1', 'weapon.11.2', 'weapon.110.1',
+    'weapon.112.1', 'weapon.114.1', 'weapon.115.1', 'weapon.116.1', 'weapon.117.1',
+    'weapon.118.1', 'weapon.119.1', 'weapon.12.1', 'weapon.12.2', 'weapon.122.1',
+    'weapon.123.1', 'weapon.124.1', 'weapon.125.1', 'weapon.126.1', 'weapon.129.1',
+    'weapon.13.1', 'weapon.13.2', 'weapon.138.1', 'weapon.14.1', 'weapon.14.2', 'weapon.15.1',
+    'weapon.15.2', 'weapon.16.1', 'weapon.16.2', 'weapon.17.1', 'weapon.17.2', 'weapon.18.1',
+    'weapon.19.1', 'weapon.19.2', 'weapon.2.1', 'weapon.2.2', 'weapon.20.1', 'weapon.20.2',
+    'weapon.21.1', 'weapon.21.2', 'weapon.22.1', 'weapon.23.1', 'weapon.23.2', 'weapon.24.1',
+    'weapon.24.2', 'weapon.25.1', 'weapon.25.2', 'weapon.26.1', 'weapon.26.2', 'weapon.27.1',
+    'weapon.27.2', 'weapon.28.1', 'weapon.28.2', 'weapon.29.1', 'weapon.29.2', 'weapon.3.1',
+    'weapon.3.2', 'weapon.30.1', 'weapon.30.2', 'weapon.31.1', 'weapon.32.1', 'weapon.32.2',
+    'weapon.33.1', 'weapon.34.1', 'weapon.34.2', 'weapon.35.1', 'weapon.35.2', 'weapon.36.1',
+    'weapon.36.2', 'weapon.37.1', 'weapon.38.1', 'weapon.38.2', 'weapon.39.1', 'weapon.4.1',
+    'weapon.4.2', 'weapon.40.1', 'weapon.40.2', 'weapon.41.1', 'weapon.41.2', 'weapon.42.1',
+    'weapon.42.2', 'weapon.43.1', 'weapon.43.2', 'weapon.44.1', 'weapon.45.1', 'weapon.46.1',
+    'weapon.47.1', 'weapon.48.1', 'weapon.49.1', 'weapon.49.2', 'weapon.5.1', 'weapon.50.1',
+    'weapon.51.1', 'weapon.51.2', 'weapon.52.1', 'weapon.52.2', 'weapon.53.1', 'weapon.54.1',
+    'weapon.55.1', 'weapon.56.1', 'weapon.56.2', 'weapon.57.1', 'weapon.58.1', 'weapon.58.2',
+    'weapon.59.1', 'weapon.6.1', 'weapon.6.2', 'weapon.60.1', 'weapon.61.1', 'weapon.62.1',
+    'weapon.62.2', 'weapon.63.1', 'weapon.64.1', 'weapon.64.2', 'weapon.65.1', 'weapon.66.1',
+    'weapon.66.2', 'weapon.67.1', 'weapon.68.1', 'weapon.69.1', 'weapon.7.1', 'weapon.7.2',
+    'weapon.70.1', 'weapon.71.1', 'weapon.72.1', 'weapon.73.1', 'weapon.74.1', 'weapon.75.1',
+    'weapon.76.1', 'weapon.77.1', 'weapon.78.1', 'weapon.79.1', 'weapon.8.1', 'weapon.8.2',
+    'weapon.80.1', 'weapon.81.1', 'weapon.82.1', 'weapon.83.1', 'weapon.85.1', 'weapon.86.1',
+    'weapon.9.1', 'weapon.9.2', 'weapon.90.1', 'weapon.91.1', 'weapon.93.1', 'weapon.94.1',
+    'weapon.95.1', 'weapon.96.1', 'weapon.98.1', 'weapon.99.1',
+)
+STARTER_PART_IDS = (
+    'item.job_panzer.1.1', 'item.job_panzer.1.10', 'item.job_panzer.1.11',
+    'item.job_panzer.1.12', 'item.job_panzer.1.13', 'item.job_panzer.1.14',
+    'item.job_panzer.1.15', 'item.job_panzer.1.2', 'item.job_panzer.1.3',
+    'item.job_panzer.1.4', 'item.job_panzer.1.5', 'item.job_panzer.1.7', 'item.job_panzer.1.8',
+    'item.job_panzer.1.9', 'item.job_panzer.2.1', 'item.job_panzer.2.10',
+    'item.job_panzer.2.11', 'item.job_panzer.2.12', 'item.job_panzer.2.13',
+    'item.job_panzer.2.14', 'item.job_panzer.2.2', 'item.job_panzer.2.3',
+    'item.job_panzer.2.5', 'item.job_panzer.2.6', 'item.job_panzer.2.7', 'item.job_panzer.2.8',
+    'item.job_panzer.2.9', 'item.job_panzer.3.1', 'item.job_panzer.3.10',
+    'item.job_panzer.3.11', 'item.job_panzer.3.12', 'item.job_panzer.3.13',
+    'item.job_panzer.3.14', 'item.job_panzer.3.15', 'item.job_panzer.3.16',
+    'item.job_panzer.3.2', 'item.job_panzer.3.3', 'item.job_panzer.3.6', 'item.job_panzer.3.7',
+    'item.job_panzer.3.8', 'item.job_panzer.3.9', 'item.job_panzer.4.1',
+    'item.job_panzer.4.10', 'item.job_panzer.4.11', 'item.job_panzer.4.12',
+    'item.job_panzer.4.13', 'item.job_panzer.4.14', 'item.job_panzer.4.15',
+    'item.job_panzer.4.16', 'item.job_panzer.4.2', 'item.job_panzer.4.3',
+    'item.job_panzer.4.4', 'item.job_panzer.4.5', 'item.job_panzer.4.6', 'item.job_panzer.4.7',
+    'item.job_panzer.4.8', 'item.job_panzer.4.9', 'item.job_panzer.5.1',
+    'item.job_panzer.5.10', 'item.job_panzer.5.11', 'item.job_panzer.5.12',
+    'item.job_panzer.5.13', 'item.job_panzer.5.14', 'item.job_panzer.5.2',
+    'item.job_panzer.5.3', 'item.job_panzer.5.4', 'item.job_panzer.5.5', 'item.job_panzer.5.6',
+    'item.job_panzer.5.7', 'item.job_panzer.5.8', 'item.job_panzer.5.9',
+)
+STARTER_COSTUME_IDS = (
+    'item.costume_10_2', 'item.costume_12_2', 'item.costume_13_2', 'item.costume_15_2',
+    'item.costume_18_2', 'item.costume_1_2', 'item.costume_20_2', 'item.costume_21_2',
+    'item.costume_24_2', 'item.costume_26_2', 'item.costume_27_2', 'item.costume_34_2',
+    'item.costume_35_2', 'item.costume_37_2', 'item.costume_38_2', 'item.costume_39_2',
+    'item.costume_3_2', 'item.costume_40_2', 'item.costume_43_2', 'item.costume_45_2',
+    'item.costume_47_2', 'item.costume_48_2', 'item.costume_49_2', 'item.costume_4_2',
+    'item.costume_51_2', 'item.costume_52_2', 'item.costume_58_2', 'item.costume_7_2',
+    'item.costume_8_2',
+)
 
 UNLOCK_ITEM_PREFIXES = (
     'item.furniture.', 'item.illust.', 'item.bg.', 'item.clock.',
@@ -1502,6 +1983,7 @@ def owned_item_ids():
     except Exception:
         pass
     return owned
+
 
 def _grant_unlock_item(item_id):
 
@@ -1695,6 +2177,103 @@ def _received_reward_type(master_rt, odds):
 
     return rt
 
+def _insert_breaking_parts(rewards, extra):
+
+    # The official response places the breaking-part rewards right before the
+    # trailing magara entry: 1, 2, 7, 6, 14, 14, 6[magara], 5, 5, 5, 5.
+    if not extra:
+        return rewards
+    out = list(rewards)
+    cut = len(out)
+    if out and out[-1].get('RewardItemId') == 'item.magara':
+        cut = len(out) - 1
+    out[cut:cut] = extra
+    return out
+def _breaking_parts_rewards(quest_id, difficulty, broken_ids, runs=1):
+
+    # "BrokenPartIds" arrives as "<breaking_parts table>-<part id>" strings.
+    # Each breaking_parts record carries the reward table it pays out
+    # (RewardId, e.g. quest_reward.breaking_parts.god_1), so one payout is
+    # rolled per reported part -- which is what the official data shows: two
+    # reported parts produce two RewardType=14 rows on quest/end.
+    # quest/skip sends no BrokenPartIds at all, so the parts are recovered
+    # from the quest's own enemy group instead.
+    out = []
+    if not isinstance(broken_ids, (list, tuple)):
+        broken_ids = []
+    try:
+        md = master_tables()
+    except Exception:
+        return out
+    _bp_tbl = md.get('breaking_parts') or {}
+
+    def _payout(table_id):
+        for _rec in quest_reward_rows(table_id, difficulty):
+            _id = _rec.get('RewardId')
+            if not _id:
+                continue
+            _lo = int(_rec.get('MinCount') or 1)
+            _hi = int(_rec.get('MaxCount') or _lo)
+            _n = _lo if _hi <= _lo else random.randint(_lo, _hi)
+            _item = _grant_reward(_id, _n, _rec.get('RewardParam'))
+            out.append({'RewardType': 14, 'RewardItemId': _id,
+                        'RewardParam': _rec.get('RewardParam'),
+                        'RewardItemCount': _n, 'CelebRate': 0, 'EvDrop': 0,
+                        'CType': 0, 'GroupNo': 0, 'GroupRewards': []})
+
+    _parts = []
+    for _b in broken_ids:
+        _s = str(_b or '')
+        if '-' not in _s:
+            continue
+        _tbl, _pid = _s.rsplit('-', 1)
+        _parts.append((_tbl, _pid))
+    if not _parts:
+
+        _parts = _quest_breaking_parts(quest_id)
+    for _tbl, _pid in _parts:
+        _row = _bp_tbl.get(_tbl)
+        _rid = None
+        if isinstance(_row, dict):
+            for _rec in (_row.get('Records') or []):
+                if isinstance(_rec, dict) and str(_rec.get('Id')) == _pid:
+                    _rid = _rec.get('RewardId')
+                    break
+        if not _rid:
+            continue
+        _payout(_rid)
+    return out
+
+def _quest_breaking_parts(quest_id):
+
+    # quest -> enemy_group (via DifficultyData) -> BreakingPartsId, then the
+    # part ids inside that table.
+    out = []
+    try:
+        md = master_tables()
+        q = (md.get('quest') or {}).get(quest_id) or {}
+    except Exception:
+        return out
+    _dd = q.get('DifficultyData') or []
+    _eg = str((_dd[0] or {}).get('EnemyGroupId') or '') if _dd else ''
+    if not _eg:
+        return out
+    _grp = (md.get('enemy_group') or {}).get(_eg) or {}
+    _seen = []
+    for _rec in (_grp.get('Records') or []):
+        if not isinstance(_rec, dict):
+            continue
+        _t = str(_rec.get('BreakingPartsId') or '')
+        if _t and _t not in _seen:
+            _seen.append(_t)
+    _bp_tbl = md.get('breaking_parts') or {}
+    for _t in _seen:
+        _row = _bp_tbl.get(_t) or {}
+        for _rec in (_row.get('Records') or []):
+            if isinstance(_rec, dict) and _rec.get('RewardId'):
+                out.append((_t, str(_rec.get('Id'))))
+    return out
+
 def roll_quest_rewards(quest_id, difficulty, first_time=False):
 
     try:
@@ -1750,7 +2329,67 @@ def roll_quest_rewards(quest_id, difficulty, first_time=False):
 
 _REWARD_TYPE_BY_PREFIX = (('item.jewel', 1), ('item.gold', 1), ('oopart.', 6),
                           ('chara.', 3), ('item.box.', 17), ('item.oopartsexp', 7),
-                          ('item.charaexp', 7), ('item.general_god_part', 14))
+                          ('item.charaexp', 7), ('item.general_god_part', 14),
+                          ('item.mogu_shampoo', 17))
+
+def _rank_reward_total(reward_id, amount, key='Rank'):
+
+    # Reward-only-in-aggregate helper: how many of each reward id the tiers at
+    # or below `amount` are worth, WITHOUT granting anything.  Used to pay only
+    # the difference between two scores (see big-battle/end): the same score
+    # must never be paid twice, but a higher score still owes the new tiers.
+    tbl = (master_tables().get('rank_reward') or {}).get(reward_id) or {}
+    try:
+        amount = int(amount or 0)
+    except Exception:
+        amount = 0
+    out = {}
+    for rec in (tbl.get('Records') or []):
+        try:
+            need = int(rec.get(key) if rec.get(key) is not None
+                       else (rec.get('Rank') or rec.get('Score') or 0))
+        except Exception:
+            continue
+        if amount < need:
+            continue
+        rid = rec.get('RewardId')
+        if not rid:
+            continue
+        out[rid] = out.get(rid, 0) + int(rec.get('Count') or 1)
+    return out
+
+def _big_battle_daily(hit, bid=None):
+
+    # Per-day rollover for a BigBattle row.  The game day starts at 05:00 JST
+    # (_ingame_day), and both the score and the attempt counter reset with it:
+    #   ResetAt  date string ('20260926') of the day the current Score belongs to
+    #   Score    the best score of THAT day  (skip pays from this, tutorial 7/10)
+    #   Num      attempts used that day
+    #   Logs['C'] how many shampoo the day has already paid out, so a repeat run
+    #             does not re-pay the tiers already collected.
+    # Returns (rolled, previous_day_score_if_any).
+    if not isinstance(hit, dict):
+        return False, 0
+    today = _ingame_day().replace('-', '')
+    if str(hit.get('ResetAt') or '') == today:
+        return False, 0
+    _prev = int(hit.get('Score') or 0)
+    hit['ResetAt'] = today
+    hit['Score'] = 0
+    hit['Num'] = 0
+    # Drop the payout ledger.  Keys are 'C_<reward id with dots as
+    # underscores>' (one per reward id), so match the prefix rather than the
+    # bare letter -- clearing only 'C' left yesterday's counts in place and the
+    # new day paid nothing until the old totals were exceeded again.
+    _logs = hit.get('Logs')
+    if not isinstance(_logs, dict):
+        _logs = {}
+    for _k in [k for k in _logs if str(k).startswith('C_')]:
+        _logs.pop(_k, None)
+    hit['Logs'] = _logs
+    log('    big-battle rollover %s: new day %s (previous score %d) -> Score/Num/paid reset'
+        % (hit.get('Id'), today, _prev))
+    return True, _prev
 
 def _rank_reward_rows(reward_id, amount, key='Rank'):
 
@@ -1813,6 +2452,15 @@ def _grant_weapon(weapon_id):
     db_put('UserPossession', rows)
     return fresh
 
+# Frame icons and stamps do NOT get one row each.  The client reads a single
+# collection row whose Records dictionary is keyed by the bare number/name:
+#     {"Id": "frames", "Records": {"4": 1, "33": 0}}
+#     {"Id": "stamps", "Records": {"stamp_0004": 0}}
+# one row per frame.*/stamp.* never shows up in the UI.  The key is the id
+# with its table prefix stripped (frame.31 -> "31", stamp.stamp_0004 ->
+# "stamp_0004") and the value is 1 for a new item, 0 once it has been seen.
+_COLLECTION_ROW = {'frame.': 'frames', 'stamp.': 'stamps'}
+
 def _grant_possession_flag(rid):
 
     if not isinstance(rid, str) or '.' not in rid:
@@ -1820,15 +2468,50 @@ def _grant_possession_flag(rid):
     rows = db_get('UserPossession')
     if not isinstance(rows, list):
         rows = []
+    _coll = None
+    _key = rid
+    for _pfx, _cid in _COLLECTION_ROW.items():
+        if rid.startswith(_pfx):
+            _coll = _cid
+            _key = rid.split('.', 1)[1]
+            break
+    if _coll is None:
+        # Not a collection-backed unlock: keep the old one-row-per-id shape.
+        for r in rows:
+            if isinstance(r, dict) and r.get('Id') == rid:
+                return r
+        fresh = {'UserId': user_id(), 'Id': rid, 'ReadFlag': True,
+                 'Records': None, 'Ver': 0}
+        rows.append(fresh)
+        touch(rid, fresh, 'UserPossession')
+        db_put('UserPossession', rows)
+        return fresh
+    row = None
     for r in rows:
-        if isinstance(r, dict) and r.get('Id') == rid:
-            return r
-    fresh = {'UserId': user_id(), 'Id': rid, 'ReadFlag': True,
-             'Records': None, 'Ver': 0}
-    rows.append(fresh)
-    touch(rid, fresh, 'UserPossession')
+        if isinstance(r, dict) and r.get('Id') == _coll:
+            row = r
+            break
+    if row is None:
+        row = {'UserId': user_id(), 'Id': _coll, 'ReadFlag': False,
+               'Records': {}, 'Ver': 0}
+        rows.append(row)
+    rec = row.get('Records')
+    if not isinstance(rec, dict):
+        rec = {}
+        row['Records'] = rec
+    if _key not in rec:
+        rec[_key] = 1
+        row['Ver'] = int(row.get('Ver') or 0) + 1
+    # Also drop any legacy one-row-per-id leftovers so the two shapes never
+    # coexist (the old shape is invisible to the client and only confuses).
+    _legacy = [r for r in rows
+               if isinstance(r, dict) and r.get('Id') == rid]
+    if _legacy:
+        rows[:] = [r for r in rows
+                   if not (isinstance(r, dict) and r.get('Id') == rid)]
+    touch(_coll, row, 'UserPossession')
     db_put('UserPossession', rows)
-    return fresh
+    return row
 
 def _grant_word_possession(rid):
 
@@ -1909,7 +2592,7 @@ def _grant_reward(reward_id, count, plus_param=None):
                 _grant_chara(rid)
         elif rid.startswith('oopart.'):
 
-            _grant_oopart(rid, plus_param)
+            _grant_oopart(rid, plus_param, count)
         elif rid.startswith('weapon.'):
             _grant_weapon(rid)
         elif rid.startswith('stamp.') or rid.startswith('frame.'):
@@ -1920,10 +2603,17 @@ def _grant_reward(reward_id, count, plus_param=None):
             rows = db_get('Fragment')
             if not isinstance(rows, list):
                 rows = []
-            if not any(isinstance(x, dict) and x.get('Id') == rid for x in rows):
-                rows.append({'UserId': user_id(), 'Id': rid, 'Level': 1,
-                             'IsNew': True, 'ReceivedAt': _now_iso(), 'Ver': 0})
+            _hit = next((x for x in rows
+                         if isinstance(x, dict) and x.get('Id') == rid), None)
+            if _hit is None:
+                _hit = {'UserId': user_id(), 'Id': rid, 'Level': 1,
+                        'IsNew': True, 'ReceivedAt': _now_iso(), 'Ver': 0}
+                rows.append(_hit)
                 db_put('Fragment', rows)
+            # The artifact has to reach the client in THIS response.  db_put alone
+            # only persists it -- the client caches artifacts from SyncData, so
+            # without a touch the player had to relog before the fragment showed up.
+            touch(rid, _hit, 'Fragments')
         elif rid.startswith('word_possession.'):
 
             _grant_word_possession(rid)
@@ -1967,7 +2657,82 @@ def _quest_cleared(quest_id, difficulty=0):
 
     return False
 
-def record_quest_clear(quest_id, difficulty):
+def _quest_event_id(quest_id):
+
+    # quest -> quest_map -> QuestMapTypeGroupValue is the game's own route from
+    # a quest to the event that owns it (EventFacade.GetSettingEventSpecial
+    # Organizing walks exactly this chain).  Only event maps carry the value.
+    try:
+        q = (master_tables().get('quest') or {}).get(quest_id) or {}
+        mid = q.get('QuestMapId')
+        if not mid:
+            return None
+        m = (master_tables().get('quest_map') or {}).get(mid) or {}
+        v = m.get('QuestMapTypeGroupValue')
+        return str(v) if v else None
+    except Exception:
+        return None
+
+def _drop_up_points(chara_ids):
+
+    # Drop UP points for a party: each listed angel adds Rate + AdditionalPoint.
+    # The split matters because different events fill only one of the two fields
+    # (event.30014 has Rate=0/AdditionalPoint=2, event.10013 the opposite).
+    ev = None
+    try:
+        rows = db_get('User') or {}
+        if isinstance(rows, list):
+            rows = rows[0] if rows else {}
+        ev = _quest_event_id(str(rows.get('CurrentQuestId') or ''))
+    except Exception:
+        ev = None
+    if not ev:
+        return 0
+    try:
+        tbl = (master_tables().get('event_special') or {}).get(
+            'event_special.%s' % ev) or {}
+        pts = {}
+        for r in (tbl.get('Records') or []):
+            if not isinstance(r, dict):
+                continue
+            cid = str(r.get('CharaId') or '')
+            if cid:
+                pts[cid] = int(r.get('Rate') or 0) + int(r.get('AdditionalPoint') or 0)
+    except Exception:
+        return 0
+    total = 0
+    for cid in (chara_ids or []):
+        total += pts.get(str(cid), 0)
+    return total
+
+def _chara_max_limitover(rarity):
+
+    # How many level-cap releases a rarity allows: R3 = 1 (40->55), R4 = 2
+    # (45->60->70), R5 = 2 (50->70->80), R6 = 2 (50->90->120).  Derived from
+    # the chara_level_exp.<rarity>.<n> sub-tables (one per allowed step) and
+    # cross-checked with CharaConst.MaxLevel's per-grade values.
+    try:
+        r = int(rarity or 0)
+    except Exception:
+        r = 0
+    return 1 if r == 3 else 2
+
+def _chara_limitover_cost(rarity):
+
+    # game_setting.chara_limitover_cost_<rarity> = nectar needed per limit break,
+    # and chara_limitover_gold_<rarity> is the gold cost the client sends.
+    try:
+        r = int(rarity or 0)
+    except Exception:
+        r = 0
+    row = (master_tables().get('game_setting') or {}).get(
+        'game_setting.chara_limitover_cost_%d' % r) or {}
+    try:
+        return int(row.get('Value') or 0)
+    except Exception:
+        return 0
+
+def record_quest_clear(quest_id, difficulty, drop_up=0):
 
     if not quest_id:
         log('    record_quest_clear: refused (empty quest id)')
@@ -2013,6 +2778,15 @@ def record_quest_clear(quest_id, difficulty):
         hit['ClearCount'] = int(hit.get('ClearCount') or 0) + 1
         hit['TryCount'] = int(hit.get('TryCount') or 0) + 1
         hit['IsCleared'] = True
+        # Drop UP (event quests only): the highest party total ever achieved,
+        # which is what the skip dialog reads back as its +N bonus.  EventId is
+        # the owning event so the client can show the right bonus label.
+        _ev = _quest_event_id(quest_id)
+        if _ev:
+            if _ev and not hit.get('EventId'):
+                hit['EventId'] = _ev
+            if int(drop_up or 0) > int(hit.get('MaxDrop') or 0):
+                hit['MaxDrop'] = int(drop_up)
         r['QuestClearCount'] = int(r.get('QuestClearCount') or 0) + 1
 
         r['QuestEndAt'] = _now_iso()
@@ -2089,6 +2863,39 @@ def _add_exp(amount):
 
 CONVERT_PREFIX = 'item.ringo_'
 
+def _overlap_common_cost():
+
+    # game_setting.overlap_common_ringo is how many JOB ringo items a single
+    # overlap costs when the character's own duplicate is not used.
+    try:
+        row = (master_tables().get('game_setting') or {}).get(
+            'game_setting.overlap_common_ringo') or {}
+        n = int(row.get('Value') or 0)
+    except Exception:
+        n = 0
+    return n if n > 0 else 4
+
+def _overlap_ringo_id(chara_id):
+
+    # ItemConst.GetCommonRingoName builds the ringo id as
+    # String.Format("item.ringo_{0}.{1}", rarity, jobId), verified against
+    # both the client ISIL and the shipped item table (52 ringos = 4
+    # rarities x 13 jobs, all named "林檎【<job>:<star>】").
+    try:
+        c = (master_tables().get('chara') or {}).get(chara_id) or {}
+    except Exception:
+        return None
+    _job = c.get('JobId')
+    if not _job:
+        return None
+    try:
+        _rar = int(c.get('Rarity') or 0)
+    except Exception:
+        return None
+    if _rar <= 0:
+        return None
+    return 'item.ringo_%d.%s' % (_rar, _job)
+
 def _convert_rates():
 
     out = {}
@@ -2109,6 +2916,11 @@ def _convert_rates():
 
 CHARA_RESERVE_SELF = 1
 CHARA_MAX_OVERLAP = 6
+
+# MissionPassConst..cctor stores exactly 100 at [rcx], and
+# MissionPassEntity.GetPassLevel divides PassExp by it:
+#     Level = min(PassExp / PASS_EXP_PER_LEVEL, highestLevelRow)
+PASS_EXP_PER_LEVEL = 100
 
 def _convertible_duplicates(count, overlap):
 
@@ -2299,6 +3111,75 @@ def _uq_treasure_rewards(no):
         out.append('%d,%d,%s,%s,%d' % (_rt, _rrt.get(_rt, 6), _did,
                                        _d.get('RewardParam') or '', _ct))
     return out
+
+def _uq_seed_row():
+
+    # An EMPTY UniqueQuest list crashes the portal screen: the client's
+    # UniqueQuestPortalPage.Show() indexes into the fetched rows and throws
+    # IndexOutOfRangeException, which wedges the whole session (no further
+    # requests are sent).  The same trap is documented for the exchange rows
+    # (`_seed_exchange_rows`, "an empty list crashes this screen").
+    #
+    # Only the fields the portal reads before the player starts a run are
+    # filled here; everything else stays at its neutral value so /start can
+    # build on top of it.  Ids come from the master table (unique_quest.1).
+    try:
+        tbl = master_tables().get('unique_quest') or {}
+    except Exception:
+        tbl = {}
+    uid = None
+    for k in sorted(tbl):
+        uid = str(k)
+        break
+    if not uid:
+        return None
+    now = _now_iso()
+    return {'UserId': user_id(), 'Id': uid,
+            'WeekNum': 0, 'StartAt': now, 'UpdatedAt': now,
+            'UnitCost': 10, 'ClearCount': 0, 'Energy': 0,
+            'Maps': {}, 'Phantoms': [], 'ActionLogs': {},
+            'Logs': [], 'Angels': [], 'Members': [],
+            'Settings': None, 'Selected': [],
+            'Status': 0, 'Material': 0, 'Level': 1,
+            'MaxLv': 1, 'MaxLvLog': 0, 'Pt': 0,
+            'Ignores': [], 'FragmentId': None, 'Ver': 0}
+
+def _migrate_chara_weapon(rows):
+
+    # Chara.Weapon used to be stored as {'WeaponId': .., 'WeaponStyleId': ..}.
+    # The entity really has two String fields (CharaEntity offsets 152 / 160),
+    # so a stored object makes the client's JsonReader throw on login and the
+    # game never starts.  Split any leftover object into the two fields.
+    n = 0
+    for x in (rows or []):
+        if not isinstance(x, dict):
+            continue
+        wv = x.get('Weapon')
+        if isinstance(wv, dict):
+            x['Weapon'] = wv.get('WeaponId')
+            if not x.get('WS'):
+                x['WS'] = wv.get('WeaponStyleId')
+            n += 1
+    return n
+
+def seed_unique_quest():
+
+    # Idempotent: called from the READ path so a save made before this helper
+    # existed still gets its row on the next login.
+    try:
+        rows = db_get('UniqueQuest')
+        if isinstance(rows, list) and rows:
+            return 0
+        row = _uq_seed_row()
+        if not row:
+            return 0
+        db_put('UniqueQuest', [row])
+        log('    unique_quest: SEEDED %s; an empty list crashes the portal screen'
+            % row.get('Id'))
+        return 1
+    except Exception as e:
+        log('    unique_quest seed failed:', e)
+        return 0
 
 def _uq_heal(ent):
 
@@ -2904,6 +3785,54 @@ def _orb_box_rows():
 
 _ORB_NORMAL_SLOTS = 10
 
+def _orb_slots_sanitize(ent):
+
+    # The orbit box only ever holds item.box.orb.* (and item.box.orb_sp.*, which
+    # lives in PSlots).  Two things must never be in there:
+    #   * anything whose master-data Rarity is not 1..4 -- the client indexes
+    #     orb_campaign.Minutes ([45,90,120,240], four entries) with that Rarity
+    #     inside CalcOrbNormalMinute and throws IndexOutOfRangeException, which
+    #     kills HomePage.SetupOrbBoxButton and whites out the orb box screen;
+    #   * item.orb_pkey (プレミアムキー, Rarity 6).  It is an ordinary ITEM that
+    #     lives in the Item table -- it is not a box, so it must not sit in
+    #     Slots *or* Stack.  Putting it in Stack makes the client treat it as an
+    #     overflowed box and pop "未受取のノーマルボックスがあります / スロットが
+    #     いっぱい" at the player.
+    # Strays are returned to the Item table, which is where the reward code
+    # (mission_pass / rank_reward.multi_team_quest.* / challenge_mission) puts
+    # them in the first place.
+    slots = ent.get('Slots')
+    stack = ent.get('Stack')
+    if not isinstance(slots, dict):
+        slots = {}
+    if not isinstance(stack, dict):
+        stack = {}
+    strays = {}
+    for src in (slots, stack):
+        for k in list(src.keys()):
+            v = src.get(k)
+            bid = str(v.get('Id') or '') if isinstance(v, dict) else str(k)
+            cnt = int(v.get('Count') or 1) if isinstance(v, dict) else int(v or 0)
+            if bid.startswith('item.box.orb.') or bid.startswith('item.box.orb_sp.'):
+                continue
+            if src is stack and not isinstance(v, dict):
+                continue
+            src.pop(k, None)
+            strays[bid] = strays.get(bid, 0) + max(1, cnt)
+    if not strays:
+        return 0
+    ent['Slots'] = slots
+    ent['Stack'] = stack
+    for bid, cnt in strays.items():
+        try:
+            _grant_item(bid, cnt)
+        except Exception as e:
+            log('    orb_box: could not return %s x%d to the Item table: %s'
+                % (bid, cnt, e))
+    log('    orb_box: returned %d stray id(s) to the Item table (not boxes): %s'
+        % (len(strays), ', '.join('%s x%d' % kv for kv in sorted(strays.items()))))
+    return sum(strays.values())
+
 def _orb_slot_sync(ent):
 
     stack = ent.get('Stack')
@@ -2932,6 +3861,7 @@ def _orb_slot_sync(ent):
             stack.pop(box_id, None)
     ent['Slots'] = slots
     ent['Stack'] = stack
+    _orb_slots_sanitize(ent)
 
     pslots = ent.get('PSlots')
     if not isinstance(pslots, list):
@@ -2948,7 +3878,19 @@ def _orb_slot_sync(ent):
             pslots.append({'Id': 'item.box.orb_sp.1', 'CreatedAt': _now_iso(),
                            'Count': _sp_have})
         else:
+            # CreatedAt is the EXPIRY ANCHOR, not a creation log.  The client
+            # computes SpDeadLine = CreatedAt + ItemConst.GetOrbNormalMinute(rarity),
+            # and that function is a switch on rarity-1: 1->90, 2->180, 3->240,
+            # 4->480, everything higher -> 720 minutes (12 h).  item.box.orb_sp.1
+            # has Rarity 6, so its window is 12 hours from CreatedAt.
+            #
+            # Keeping the ORIGINAL CreatedAt while adding boxes drops the new ones
+            # into an already-expired window: the slot is correct on the wire but
+            # ReloadSp skips it (deadline in the past) and the player sees
+            # '-No BOX-'.  Refresh the anchor so freshly added boxes get their own
+            # 12 hours.
             _existing['Count'] = int(_existing.get('Count') or 0) + _sp_have
+            _existing['CreatedAt'] = _now_iso()
 
     for _k in list(stack.keys()):
         if _k.startswith('item.box.orb_sp.'):
@@ -3166,10 +4108,16 @@ def _orb_inventory_take(orb_id, count):
 
 def _is_orb_box_id(rid):
 
+    # ONLY the item.box.orb.* / item.box.orb_sp.* boxes may enter the slots.
+    # item.orb_pkey (プレミアムキー) is a KEY, not a box: its master-data Rarity
+    # is 6, and the client indexes orb_campaign.Minutes (= [45,90,120,240], four
+    # entries) with that Rarity inside CalcOrbNormalMinute, so a key sitting in
+    # a slot throws IndexOutOfRangeException - which kills HomePage.
+    # SetupOrbBoxButton (several home buttons never appear) and whites out the
+    # whole orb box screen.
     r = str(rid or '')
     return (r.startswith('item.box.orb.')
-            or r.startswith('item.box.orb_sp.')
-            or r == 'item.orb_pkey')
+            or r.startswith('item.box.orb_sp.'))
 
 def _orb_box_add(box_id, count):
 
@@ -3375,7 +4323,14 @@ def _end_quest_response(received=None, living=None, orb_box=None, result=None,
         'AfterDawnBreak': 0,
         'OrbBox': orb_box,
 
-        'SyncData': None,
+        # NOTE: SyncData is deliberately left out here.  Every caller builds its
+        # reply as `{'SyncData': flush_touched(empty_sync()), **_end_quest_response(...)}`
+        # and a literal 'SyncData': None in this dict would silently OVERWRITE the
+        # real payload (dict unpacking wins over an earlier identical key).  Any
+        # battle ending without touching an entity -- retire, lose, no reward --
+        # then replied with "SyncData": null, which the client cannot bind and
+        # answers with a frozen battle-exit screen.  Callers that return this
+        # dict on its own must fill SyncData themselves.
     }
 
 _UNIQUE_BARE = (
@@ -3491,6 +4446,145 @@ def _god_unlock_bits(profile_id, kill_count):
     if len(th) == 3 and th[2] and kills >= th[2]:
         bits = 0xFFFFFF
     return bits & 0xFFFFFF
+
+def _merge_god_lyric_bits(kills, bit_flag):
+
+    # A god's lyric (神獣の謡) is earned by SINGING it during battle, not by
+    # defeating the god a number of times -- UnlockPicture1/2/3 belong to the
+    # 秘蔵の画 artwork, which is a separate reward.  The client tracks which
+    # lines it heard and reports them in quest/end as SungGodLyricBitFlag,
+    # one bit per line (8 lines per chapter, 3 chapters, so bit 0..23).
+    #
+    # Verified against a live capture: defeating 騎士の神獣 (enemy.god.profile.1)
+    # sent SungGodLyricBitFlag = 1536 = 0x600 -> bits 9 and 10 newly sung.
+    # The row must therefore be OR-ed, never replaced.
+    #
+    # The save row is keyed by god, and lyric.god.<N> matches
+    # enemy.god.profile.<N> one-for-one (27 pairs; the 亜神獣 2000..2008 have
+    # no lyric).  GodLyricEntity.Unlock() itself does `flag |= old` for the same
+    # reason, so mirroring that here keeps the two sides in agreement.
+    try:
+        bits = int(bit_flag or 0)
+    except Exception:
+        return []
+    if bits <= 0:
+        return []
+    if not isinstance(kills, dict) or not kills:
+        return []
+    ids = []
+    for prof_id in kills:
+        suffix = _god_story_row_id(prof_id)
+        if not suffix:
+            continue
+        rid = 'lyric.god.' + str(suffix)
+        if rid not in (master_tables().get('god_lyric') or {}):
+            continue
+        ids.append(rid)
+    if not ids:
+        return []
+    rows = db_get('GodLyric')
+    if not isinstance(rows, list):
+        rows = []
+    out = []
+    changed = False
+    for rid in ids:
+        hit = None
+        for x in rows:
+            if isinstance(x, dict) and x.get('Id') == rid:
+                hit = x
+                break
+        if hit is None:
+            hit = {'UserId': user_id(), 'Id': rid, 'UnlockedBitFlag': 0,
+                   'ReadFlag': None, 'ReadAt': None, 'Ver': 0}
+            rows.append(hit)
+        try:
+            old = int(hit.get('UnlockedBitFlag') or 0)
+        except Exception:
+            old = 0
+        want = old | bits
+        if want != old:
+            hit['UnlockedBitFlag'] = want
+            hit['Ver'] = int(hit.get('Ver') or 0) + 1
+            log('    god lyric sung -> %s UnlockedBitFlag %d -> %d (bit %d)'
+                % (rid, old, want, bits))
+            changed = True
+        touch(rid, hit, 'GodLyrics')
+        out.append(hit)
+    if changed:
+        db_put('GodLyric', rows)
+    return out
+
+def _advance_god_lyrics_for_skip(kills, runs):
+
+    # quest/skip never runs a battle, so the client sends no
+    # SungGodLyricBitFlag -- BattleLyricSinger only accumulates that flag while
+    # actually singing, and it is only carried by EndQuestRequestData.  The map
+    # is consumed all the same, so the advance has to come from here.
+    #
+    # One skipped run is one fight, and a fight always sings at least the next
+    # line that has not been heard yet (TrySing keeps picking from the lines
+    # where IsUnlocked(index) is false).  So light the lowest un-set bit once
+    # per run.
+    #
+    # Order matters: GodLyricState.get_Chapter() reads 0xFF as 'chapter 1 done'
+    # and 0xFFFF as 'chapters 1-2 done', i.e. the 24 lines are filled strictly
+    # in sequence, 8 lines to a chapter.
+    try:
+        n = int(runs or 0)
+    except Exception:
+        return []
+    if n <= 0 or not isinstance(kills, dict) or not kills:
+        return []
+    known = master_tables().get('god_lyric') or {}
+    ids = []
+    for prof_id in kills:
+        suffix = _god_story_row_id(prof_id)
+        if not suffix:
+            continue
+        rid = 'lyric.god.' + str(suffix)
+        if rid not in known:
+            continue
+        ids.append(rid)
+    if not ids:
+        return []
+    rows = db_get('GodLyric')
+    if not isinstance(rows, list):
+        rows = []
+    out = []
+    changed = False
+    for rid in ids:
+        hit = None
+        for x in rows:
+            if isinstance(x, dict) and x.get('Id') == rid:
+                hit = x
+                break
+        if hit is None:
+            hit = {'UserId': user_id(), 'Id': rid, 'UnlockedBitFlag': 0,
+                   'ReadFlag': None, 'ReadAt': None, 'Ver': 0}
+            rows.append(hit)
+        try:
+            old = int(hit.get('UnlockedBitFlag') or 0)
+        except Exception:
+            old = 0
+        want = old
+        for _ in range(n):
+            for bit in range(24):
+                if not (want & (1 << bit)):
+                    want |= (1 << bit)
+                    break
+            else:
+                break
+        if want != old:
+            hit['UnlockedBitFlag'] = want
+            hit['Ver'] = int(hit.get('Ver') or 0) + 1
+            log('    god lyric skip -> %s UnlockedBitFlag %d -> %d (%d run(s))'
+                % (rid, old, want, n))
+            changed = True
+        touch(rid, hit, 'GodLyrics')
+        out.append(hit)
+    if changed:
+        db_put('GodLyric', rows)
+    return out
 
 def _lyric_exp_threshold(chapter):
 
@@ -3614,19 +4708,14 @@ def _sync_god_lyrics(kills):
                    'ReadFlag': None, 'ReadAt': None, 'Ver': 0}
             rows.append(hit)
             log('    god lyric -> created %s (first defeat of %s)' % (rid, prof_id))
-        want = _god_unlock_bits(prof_id, totals.get(str(prof_id), 0))
-        if want is None:
-            continue
-        try:
-            old = int(hit.get('UnlockedBitFlag') or 0)
-        except Exception:
-            old = 0
-        if want != old:
-            hit['UnlockedBitFlag'] = want
-            hit['Ver'] = int(hit.get('Ver') or 0) + 1
-            log('    god lyric -> %s UnlockedBitFlag %d -> %d (kills %d)'
-                % (rid, old, want, totals.get(str(prof_id), 0)))
-            changed = True
+
+        # NOTE: do NOT touch UnlockedBitFlag here.  That flag counts the LINES
+        # of the god's lyric that have actually been sung (8 per chapter, 3
+        # chapters), and it is written by _merge_god_lyric_bits() from the
+        # SungGodLyricBitFlag the client reports.  UnlockPicture1/2/3 on the
+        # enemy_god_profile row gate the 秘蔵の画 artwork instead; assigning
+        # them here used to CLOBBER the sung bits (observed: 1791 -> 255),
+        # which is why the lyric never advanced.
         touch(rid, hit, 'GodLyrics')
         touched_any = True
     if changed or touched_any:
@@ -3725,6 +4814,470 @@ def _level_exp_table(chara_id):
         if row:
             return row.get('Records') or []
     return None
+
+# ---------------------------------------------------------------------------
+# RELIC HUNT (event.30014) -- Dawn Break gauge
+#
+# Clearing a RELIC HUNT quest adds game_setting.dawnbreak_bonus points to the
+# counter held in UserPossession['dawn_break_point'].Records[questId].  Once the
+# gauge is full (game_setting.dawnbreak_limit) the NEXT sortie doubles the
+# oopart drops, and the gauge restarts from that clear's own gain.
+#
+# Official samples confirm the arithmetic: Before 5 -> After 8 and 8 -> 11, both
+# with dawnbreak_bonus = 3 and neither reaching the limit of 10.
+#
+# Everything here is scoped to event.30014 so no other event is affected.
+# ---------------------------------------------------------------------------
+RELIC_HUNT_EVENT = 'event.30014'
+
+def _oopart_rarity(oopart_id):
+    try:
+        m = (master_tables().get('oopart') or {}).get(oopart_id) or {}
+        return int(m.get('Rarity') or 0)
+    except Exception:
+        return 0
+
+def _oopart_max_level(oopart_id, limit_over=0):
+
+    # Mirrors OopartLevelExpMasterDataTable.GetMaxLevel: with limit breaks the
+    # cap comes from the rarity table, otherwise it is the per-rarity constant
+    # the game hard-codes (R3 55 / R4 70 / R5 80 / R6 90).
+    rar = _oopart_rarity(oopart_id)
+    try:
+        if int(limit_over or 0) > 0:
+            row = (master_tables().get('oopart_level_exp') or {}).get(
+                'oopart_level_exp.%d' % rar) or {}
+            recs = row.get('Records') or []
+            if recs:
+                # Mirrors the client exactly.  OopartLevelExpMasterDataTable
+                # .GetMaxLevel is `[Records+0x18] (the array length) + 1`, and its
+                # .cctor hard-codes 55/70/80/90 for the un-limit-broken case.
+                # Records holds the thresholds for levels 2..N, so len+1 is the
+                # top level: R6 has 119 rows -> level 120.
+                #
+                # This used to be `recs[-1].Level + 1`, which only matched by
+                # coincidence: the last row's Level already IS the top level (120),
+                # so the extra +1 produced 121.  That is not merely cosmetic --
+                # /api/oopart/enhance-plus refuses unless `current < max`, so a
+                # genuinely maxed oopart (120) compared 120 < 121 and got its
+                # Organon injection rejected.
+                return len(recs) + 1
+    except Exception:
+        pass
+    return {6: 90, 5: 80, 4: 70, 3: 55}.get(rar, 0)
+
+def _oopart_plus_floor(status_type):
+
+    # The minimum plus value a stat must already have before オルガン注入 can
+    # raise it (oopart_enhance_plus.<n>.Min).
+    try:
+        for r in (master_tables().get('oopart_enhance_plus') or {}).values():
+            if isinstance(r, dict) and int(r.get('StatusType', -1)) == int(status_type):
+                return int(r.get('Min') or 0)
+    except Exception:
+        pass
+    return 0
+
+def _relic_quest_ids():
+
+    # The quests belonging to RELIC HUNT: the event's own Records name a few,
+    # but the numbered set is matched by id prefix as well.
+    out = set()
+    try:
+        ev = (master_tables().get('event') or {}).get(RELIC_HUNT_EVENT) or {}
+        for rec in (ev.get('Records') or []):
+            if isinstance(rec, dict) and rec.get('QuestId'):
+                out.add(str(rec['QuestId']))
+    except Exception:
+        pass
+    try:
+        for key, row in (master_tables().get('quest') or {}).items():
+            rid = str((row or {}).get('ResourceId') or key)
+            if rid.startswith('quest.event_30014'):
+                out.add(rid)
+    except Exception:
+        pass
+    return out
+
+def _relic_is_hunt(quest_id):
+
+    # True only for RELIC HUNT quests, so no other event is affected.
+    if not quest_id:
+        return False
+    q = str(quest_id)
+    if q.startswith('quest.event_30014'):
+        return True
+    try:
+        return q in _relic_quest_ids()
+    except Exception:
+        return False
+
+def _relic_setting(name, default):
+    try:
+        row = (master_tables().get('game_setting') or {}).get(
+            'game_setting.%s' % name) or {}
+        v = row.get('Value')
+        if isinstance(v, str) and ',' in v:
+            return [int(x) for x in v.split(',') if x.strip()]
+        return int(v)
+    except Exception:
+        return default
+
+def _relic_dawn_row(create=False):
+
+    # dawn_break_point is a plain UserPossession row whose Records map quest ids
+    # to the accumulated gauge value.
+    rows = db_get('UserPossession')
+    if not isinstance(rows, list):
+        rows = []
+    row = None
+    for x in rows:
+        if isinstance(x, dict) and x.get('Id') == 'dawn_break_point':
+            row = x
+            break
+    if row is None and create:
+        row = {'UserId': user_id(), 'Id': 'dawn_break_point', 'ReadFlag': True,
+               'Records': {}, 'Ver': 0}
+        rows.append(row)
+    if row is not None and not isinstance(row.get('Records'), dict):
+        row['Records'] = {}
+    return rows, row
+
+def _relic_dawn_key(quest_id):
+
+    # The gauge is keyed by EVENT id, not by quest id: the captured official
+    # save holds e.g. {"event.30010": 6, ..., "event.30014": 10}, one counter
+    # per event, shared by every quest inside it.  The client then reads it
+    # with GetDawnBreakPoint(eventQuestId) where the id it passes is the event.
+    return RELIC_HUNT_EVENT
+
+def _relic_dawn_get(quest_id):
+    try:
+        _, row = _relic_dawn_row(False)
+        if row is None:
+            return 0
+        return int((row.get('Records') or {}).get(_relic_dawn_key(quest_id)) or 0)
+    except Exception:
+        return 0
+
+def _relic_dawn_add(quest_id, gain):
+
+    # Returns (before, after, broke); broke is True when the gauge was already
+    # full on entry, which makes this clear the double-drop one.
+    rows, row = _relic_dawn_row(True)
+    recs = row.get('Records') or {}
+    limit = _relic_setting('dawnbreak_limit', 10)
+    key = _relic_dawn_key(quest_id)
+    before = int(recs.get(key) or 0)
+    broke = before >= limit
+    after = (int(gain) if broke else before + int(gain))
+    recs[key] = after
+    row['Records'] = recs
+    row['Ver'] = int(row.get('Ver') or 0) + 1
+    db_put('UserPossession', rows)
+    touch('dawn_break_point', row, 'UserPossession')
+    return before, after, broke
+
+def _relic_dawn_step(quest_id):
+
+    # Wrapper for one clear of a RELIC HUNT quest.
+    if not _relic_is_hunt(quest_id):
+        return 0, 0, False
+    gain = _relic_setting('dawnbreak_bonus', 3)
+    try:
+        gain = int(gain)
+    except Exception:
+        gain = 3
+    return _relic_dawn_add(quest_id, gain)
+
+def _relic_dawn_double(quest_id):
+
+    # True when the gauge was already full before this clear, i.e. this clear
+    # is the one that drops double ooparts.
+    if not _relic_is_hunt(quest_id):
+        return False
+    return _relic_dawn_get(quest_id) >= _relic_setting('dawnbreak_limit', 10)
+
+def _relic_duplicate_rewards(rewards):
+
+    # Dawn Break doubles the oopart drops only; every other reward stays
+    # exactly as rolled.
+    if not isinstance(rewards, list):
+        return rewards
+    out = []
+    for r in rewards:
+        out.append(r)
+        try:
+            if isinstance(r, dict) and str(r.get('RewardItemId') or '').startswith('oopart.'):
+                out.append(dict(r))
+        except Exception:
+            pass
+    return out
+
+def _awaken_material_cost(chara_id, grade):
+
+    # chara_awaken.<charaId>.Records is indexed by the CURRENT grade: row 0
+    # takes grade 0 -> 1, row 1 takes 1 -> 2.  Each row is
+    # {Gold, AwakenItems:[{Id, Cost}, ...]} where a null Id means an unused
+    # slot, so those are skipped.
+    try:
+        table = (master_tables().get('chara_awaken') or {}).get(
+            'chara_awaken.%s' % chara_id) or {}
+        recs = table.get('Records') or []
+        idx = int(grade)
+        if idx < 0 or idx >= len(recs):
+            return []
+        row = recs[idx] or {}
+    except Exception:
+        return []
+    out = []
+    for it in (row.get('AwakenItems') or []):
+        if not isinstance(it, dict):
+            continue
+        iid = it.get('Id')
+        try:
+            n = int(it.get('Cost') or 0)
+        except Exception:
+            n = 0
+        if iid and n > 0:
+            out.append((str(iid), n))
+    return out
+
+def _oopart_skill_material_cost(oopart_id, level):
+
+    # oopart_skill_level.<oopartId>.Records carries one entry per TARGET level
+    # (Level 2 first), with ItemIds[] and a parallel Costs[] array.
+    try:
+        table = (master_tables().get('oopart_skill_level') or {}).get(
+            'oopart_skill_level.%s' % oopart_id) or {}
+        recs = table.get('Records') or []
+        row = None
+        for x in recs:
+            if isinstance(x, dict) and int(x.get('Level') or 0) == int(level):
+                row = x
+                break
+        if row is None:
+            return []
+    except Exception:
+        return []
+    ids = row.get('ItemIds') or []
+    costs = row.get('Costs') or []
+    out = []
+    for i, iid in enumerate(ids):
+        if not iid:
+            continue
+        try:
+            n = int(costs[i] or 0) if i < len(costs) else 0
+        except Exception:
+            n = 0
+        if n > 0:
+            out.append((str(iid), n))
+    return out
+
+def _lounge_param_up_cost(status, level):
+
+    # lounge_param_up.<status>.Records is a per-step ladder; index 0 takes the
+    # stat to level 2 (the counter lives in
+    # UserPossession['lounge.Interior_level'].Records['param_up.<status>']).
+    try:
+        table = (master_tables().get('lounge_param_up') or {}).get(
+            'lounge_param_up.%s' % status) or {}
+        recs = table.get('Records') or []
+        idx = int(level) - 2
+        if idx < 0 or idx >= len(recs):
+            return [], 0
+        row = recs[idx] or {}
+    except Exception:
+        return [], 0
+    out = []
+    iid = row.get('ItemId')
+    try:
+        n = int(row.get('Cost') or 0)
+    except Exception:
+        n = 0
+    if iid and n > 0:
+        out.append((str(iid), n))
+    try:
+        gold = int(row.get('Gold') or 0)
+    except Exception:
+        gold = 0
+    return out, gold
+
+def _pay_materials(need):
+
+    # Shared all-or-nothing payer used by the awaken / oopart-skill / lounge
+    # param paths: if any single material is short nothing is consumed and the
+    # caller must refuse the request.
+    if not need:
+        return True, []
+    for iid, n in need:
+        try:
+            have = int((_item_entity(iid) or {}).get('Count') or 0)
+        except Exception:
+            have = 0
+        if have < n:
+            log('    pay_materials: need %d %s but have %d' % (n, iid, have))
+            return False, []
+    for iid, n in need:
+        _consume_item(iid, n, strict=False)
+    return True, need
+
+def _ura_material_cost(chara_id, utype, level):
+
+    # chara_ura.<rarity>.Records is the per-step cost ladder; index 0 is the
+    # step that reaches level 2, so a target level L maps to row L-2.
+    # Each row spends Cost2 of item.ura_param_<Type> plus Cost of the row's
+    # ItemId (item.ura_only_1/2/3) whenever ItemId is set.
+    try:
+        cm = (master_tables().get('chara') or {}).get(chara_id) or {}
+        rarity = int(cm.get('Rarity') or 0)
+        table = (master_tables().get('chara_ura') or {}).get(
+            'chara_ura.%d' % rarity) or {}
+        recs = table.get('Records') or []
+        idx = int(level) - 2
+        if idx < 0 or idx >= len(recs):
+            return []
+        row = recs[idx] or {}
+    except Exception:
+        return []
+    out = []
+    try:
+        c2 = int(row.get('Cost2') or 0)
+    except Exception:
+        c2 = 0
+    try:
+        ut = int(utype)
+    except Exception:
+        ut = -1
+    if c2 > 0 and 0 <= ut < 6:
+        out.append(('item.ura_param_%d' % ut, c2))
+    iid = row.get('ItemId')
+    try:
+        c1 = int(row.get('Cost') or 0)
+    except Exception:
+        c1 = 0
+    if iid and c1 > 0:
+        # item.ura_only_3 is referenced by chara_ura.* but was never shipped in
+        # the client's own item table (it is missing from the official
+        # masterdata dump too), so the last two steps of every ladder would be
+        # unpayable.  Fall back to the highest feed that does exist.
+        _iid = str(iid)
+        if _iid == 'item.ura_only_3' and not (master_tables().get('item') or {}).get(_iid):
+            _iid = 'item.ura_only_2'
+        out.append((_iid, c1))
+    return out
+
+def _pay_ura_materials(need):
+
+    # All-or-nothing, same contract as the skill and weapon paths: if any one
+    # material is short nothing is consumed and the caller must refuse.
+    if not need:
+        return True, []
+    for iid, n in need:
+        try:
+            have = int((_item_entity(iid) or {}).get('Count') or 0)
+        except Exception:
+            have = 0
+        if have < n:
+            log('    enhance-ura: need %d %s but have %d' % (n, iid, have))
+            return False, []
+    for iid, n in need:
+        _consume_item(iid, n, strict=False)
+    return True, need
+
+def _skill_wild_material(chara_id, stype, level):
+
+    # The skill screen offers a second material set: a single
+    # item.skillenhancements_wild_N (輝く…の黙示録) replaces the whole normal
+    # set for that step.  Its own description states it:
+    #   "調停の黙示録の上位アイテム。これひとつで大天使スキルの習得ができる"
+    # and the client shows the counter as "<owned> / 1".  The item ids are not
+    # listed in chara_skill_level (that table only carries the normal set), so
+    # the tier is taken from the normal set instead: wild_1 pairs with
+    # skillenhancements_4, wild_2 with _5, wild_3 with _6 (ItemTypeParameter
+    # 8/9/10 mirrors the 4/5/6 tier).
+    row = _skill_level_row(chara_id, stype, level)
+    ids = [str(i) for i in (row.get('ItemIds') or []) if i]
+    tier = 0
+    for iid in ids:
+        if iid.startswith('item.skillenhancements_'):
+            try:
+                tier = max(tier, int(iid.rsplit('_', 1)[1]))
+            except Exception:
+                pass
+    if tier < 4:
+        return []
+    _wid = 'item.skillenhancements_wild_%d' % (tier - 3)
+    if not (master_tables().get('item') or {}).get(_wid):
+        return []
+    return [(_wid, 1)]
+
+def _skill_level_row(chara_id, stype, level):
+
+    # chara_skill_level.<type>.<chara> lists one record per target level, and
+    # each record carries both the gold cost and the materials (ItemIds[] with
+    # the matching Costs[]).  Skills 0-3 and bless (4) all charge materials,
+    # so the caller must consume them alongside the gold.
+    try:
+        row = (master_tables().get('chara_skill_level') or {}).get(
+            'chara_skill_level.%d.%s' % (int(stype), chara_id)) or {}
+    except Exception:
+        return {}
+    # The Level column is the value the stat REACHES, and its numbering differs
+    # per skill type: skills 0 and bless 4 count from 1 (SkillLevel 1 -> row
+    # Level 2), while the three ex-skills 1/2/3 count from 8 because
+    # ExSkillLevels holds 0-based progress (Ex 0 -> row Level 8, Ex 1 -> row
+    # Level 9, ...).  Official sample: type 3 with UseGold 109400 lands on the
+    # row whose Level is 9 and leaves ExSkillLevels [0,0,2].
+    want = int(level) + 7 if int(stype) in (1, 2, 3) else int(level)
+    for rec in (row.get('Records') or []):
+        if not isinstance(rec, dict):
+            continue
+        try:
+            if int(rec.get('Level') or 0) == want:
+                return rec
+        except Exception:
+            continue
+    return {}
+
+def _skill_material_cost(chara_id, stype, level):
+
+    # Returns [(item_id, count)] for the level being bought.
+    rec = _skill_level_row(chara_id, stype, level)
+    ids = rec.get('ItemIds') or []
+    costs = rec.get('Costs') or []
+    out = []
+    for i, iid in enumerate(ids):
+        if not iid:
+            continue
+        try:
+            need = int(costs[i] or 0) if i < len(costs) else 0
+        except Exception:
+            need = 0
+        if need > 0:
+            out.append((str(iid), need))
+    return out
+
+def _pay_skill_materials(chara_id, stype, level, wild=False):
+
+    # All-or-nothing: every material must be affordable, otherwise nothing is
+    # taken (so a refused enhance never eats the player's items).  wild picks
+    # the 輝く…の黙示録 set instead of the normal one.
+    need = (_skill_wild_material(chara_id, stype, level) if wild
+            else _skill_material_cost(chara_id, stype, level))
+    if not need:
+        return True, []
+    for iid, n in need:
+        try:
+            have = int((_item_entity(iid) or {}).get('Count') or 0)
+        except Exception:
+            have = 0
+        if have < n:
+            log('    enhance-skill REFUSED: need %d %s but have %d' % (n, iid, have))
+            return False, []
+    for iid, n in need:
+        _consume_item(iid, n, strict=False)
+    return True, need
 
 def _skill_cap(chara_id, stype):
 
@@ -3888,8 +5441,33 @@ def _chara_pool():
         pass
     return pools
 
+def _banner_hold_id(play_id):
+
+    # The hold (banner) that owns a given play id; the rate tables are stored
+    # per banner because banners reuse lottery ids with their own weights.
+    try:
+        rows = db_get('GachaHold') or {}
+        if isinstance(rows, dict):
+            rows = rows.get('GachaHold') or []
+        for banner in rows:
+            if not isinstance(banner, dict):
+                continue
+            for gp in (banner.get('GachaPlayMasterDataList') or []):
+                if isinstance(gp, dict) and gp.get('Id') == play_id:
+                    return str((banner.get('GachaHold') or {}).get('Id') or '')
+    except Exception:
+        pass
+    return ''
+
 def _lottery_tables():
 
+    # Each banner ships its OWN GachaLotteryMasterDataList, and different
+    # banners legitimately reuse the same ResourceId with different weights
+    # (gacha_lottery.nomal_no_pick is 1000/2900/3800/2300 for the premium
+    # banner but 300/1400/3800/4500 for most others).  Keying only by
+    # ResourceId made every banner overwrite the previous one, so a pool could
+    # be drawn with another banner's odds while its rate screen showed its own.
+    # Store per banner and per play as well as the bare id.
     global _LOTTERY_TABLES
     if _LOTTERY_TABLES is not None:
         return _LOTTERY_TABLES
@@ -3901,6 +5479,11 @@ def _lottery_tables():
         for banner in rows:
             if not isinstance(banner, dict):
                 continue
+            hold = banner.get('GachaHold') or {}
+            hid = str(hold.get('Id') or '')
+            play_ids = [str((gp or {}).get('Id'))
+                        for gp in (banner.get('GachaPlayMasterDataList') or [])
+                        if isinstance(gp, dict) and (gp or {}).get('Id')]
             for lt in (banner.get('GachaLotteryMasterDataList') or []):
                 if not isinstance(lt, dict):
                     continue
@@ -3908,13 +5491,21 @@ def _lottery_tables():
                 if not rid:
                     continue
                 tbl = []
-                for r in (lt.get('Records') or []):
+                for lr in (lt.get('Records') or []):
                     try:
-                        tbl.append((int(r.get('Rarity') or 0), int(r.get('Weight') or 0)))
+                        tbl.append((int(lr.get('Rarity') or 0), int(lr.get('Weight') or 0)))
                     except Exception:
                         continue
-                if tbl:
-                    out[rid] = tbl
+                if not tbl:
+                    continue
+                keys = []
+                if hid:
+                    keys.append('%s|%s' % (hid, rid))
+                for pid in play_ids:
+                    keys.append('%s|%s' % (pid, rid))
+                for k in keys:
+                    out.setdefault(k, tbl)
+                out.setdefault(str(rid), tbl)
     except Exception as e:
         log('lottery table load failed:', e)
     _LOTTERY_TABLES = out
@@ -3922,12 +5513,20 @@ def _lottery_tables():
 
 _LOTTERY_TABLES = None
 
-def _lottery_rates(lottery_id):
+def _lottery_rates(lottery_id, play_id=None, banner_id=None):
 
-    tbl = _lottery_tables().get(lottery_id)
-    if tbl:
-        return tbl
-    return list(GACHA_RATES_FALLBACK)
+    # Resolution order matters: a banner may legally reuse a lottery id with
+    # its own weights, so prefer the banner/play scoped entry and only then
+    # fall back to the shared id.
+    tabs = _lottery_tables()
+    for key in (('%s|%s' % (banner_id, lottery_id)) if banner_id else None,
+                ('%s|%s' % (play_id, lottery_id)) if play_id else None,
+                str(lottery_id)):
+        if key and tabs.get(key):
+            return tabs[key]
+    # Last resort: the rarity spread the game itself treats as the standard
+    # gacha distribution (weights sum to 10000).
+    return [(6, 300), (5, 1400), (4, 3800), (3, 4500)]
 
 def _roll_one(rates, pools):
 
@@ -3963,14 +5562,16 @@ def _banner_up_ids(gacha_id):
         pass
     return []
 
-def roll_gacha(count, main_lottery=None, last_lottery=None, up_ids=None, pools=None):
+def roll_gacha(count, main_lottery=None, last_lottery=None, up_ids=None, pools=None,
+               play_id=None, banner_id=None):
 
     if not pools:
         pools = _chara_pool()
     if not pools:
         return []
-    main_rates = _lottery_rates(main_lottery)
-    last_rates = _lottery_rates(last_lottery) if last_lottery else main_rates
+    main_rates = _lottery_rates(main_lottery, play_id, banner_id)
+    last_rates = (_lottery_rates(last_lottery, play_id, banner_id)
+                  if last_lottery else main_rates)
 
     up = [u for u in (up_ids or []) if u in (pools.get(6) or []) + (pools.get(5) or [])]
     out = []
@@ -4102,6 +5703,11 @@ def gacha_reward_payload(rewards, group_ids=None):
                        'RewardGroupId': int(_gid),
                        'Count': r['Count']})
         dup = _grant_chara(r['RewardId'])
+        # A brand-new character also becomes the player card, exactly like
+        # the home screen picks one up on the first pull.  Done here (at grant
+        # time) so the card is valid before the client can open the page.
+        if not dup and str(r['RewardId']).startswith('chara.'):
+            _set_profile_defaults(str(r['RewardId']))
         item_id, cnt = DUP_ASH.get(r.get('Rarity'), ('item.terra_ash', 5))
         if dup:
             _grant_item(item_id, cnt)
@@ -4717,7 +6323,15 @@ def save_home_setting(home_setting_id, records):
                 _v = _rec.get(_k)
                 if not isinstance(_v, str) or not _v:
                     continue
-                if _v.startswith('chara.'):
+                # Only item.* ids are things the player OWNS.  Everything else
+                # living in these slots is static master data:
+                #   FrontLayerId        chara.74            (an angel)
+                #   FrontLayerId        enemy.god.profile.16 (a god)   <- not chara.*
+                #   IllustrationLayerId chara.22_1
+                # Treating a non-item id as 'not owned' made the server rewrite a
+                # perfectly legal selection into the default, which showed the wrong
+                # background and wedged the client when a god was involved.
+                if not _v.startswith('item.'):
                     continue
                 if _v in _owned:
                     continue
@@ -4866,24 +6480,18 @@ def _jewel_batch_key(dt=None):
 
 def _sync_paid_jewel_records(ent):
 
-    try:
-        count = int(ent.get('Count') or 0)
-    except Exception:
-        count = 0
-    rec = ent.get('Records')
-    if isinstance(rec, dict) and rec:
-
-        try:
-            total = sum(int(v) for v in rec.values())
-        except Exception:
-            total = None
-        if total != count:
-            ent['Records'] = {_jewel_batch_key(): count} if count > 0 else None
-        return ent
-    if count <= 0:
-        ent['Records'] = None
-        return ent
-    ent['Records'] = {_jewel_batch_key(): count}
+    # Paid jewels must carry an EMPTY Records dict -- not null, and not a
+    # dated batch.  Two separate client paths read this member:
+    #   * JewelDetailPopup.SetupExpiration dereferences Records before it
+    #     checks the length (ISIL: Move rdx,[rax+56]; Compare rdx,0;
+    #     JumpIfEqual {throw}), so null raises a NullReferenceException the
+    #     moment the jewel tab is opened; an empty dict takes the "no length"
+    #     branch and simply shows no expiration line.
+    #   * ItemEntity.TryExpireJewel walks the dict and drops every batch key
+    #     older than "now - 150 days" (150 is hard-coded in ItemConst+380),
+    #     so any dated key would wipe the balance 150 days later.  With no
+    #     keys the walk finds nothing and the balance never rots.
+    ent['Records'] = {}
     return ent
 
 def _fix_item_records(ent):
@@ -4991,6 +6599,11 @@ def flush_touched(sync):
 STAMINA_RECOVERY_LIMIT = 150
 STAMINA_HARD_MAX = 9999
 
+# Jewels spent per single stamina recovery.  Mirrors UserConst's constant 100
+# (its .cctor writes [rcx+4] = 100) which StaminaPopup multiplies by the number
+# of recoveries the player picked before sending the total as UseItem.Count.
+JEWEL_STAMINA_COST = 100
+
 def stamina_amount(item_id):
 
     m = master_tables().get('item', {}).get(item_id)
@@ -5020,6 +6633,10 @@ def parse_use_items(req):
 
 def recover_stamina(item_id, amount):
 
+    # Two different ceilings, do not conflate them: the rank-derived limit from
+    # user_rank.StaminaRecoveryLimit is only the ceiling for NATURAL regeneration
+    # (and for the bar the UI draws), while items and jewels may push stamina up
+    # to STAMINA_HARD_MAX (9999).  Clamping recovery at the rank limit was wrong.
     global _USER_CACHE
     u = db_get('User')
     if not isinstance(u, dict):
@@ -5107,6 +6724,12 @@ def seed():
 JEWEL_FREE = 40000000
 JEWEL_PAID = 40000000
 
+# "Nico-chan Pt" is the currency the lounge shop spends, and it is only ever
+# produced by converting expired gacha exchange points -- an automatic process
+# that no longer runs once the service is gone, so a fresh save could never
+# reach the 44 items that shop sells.  Granted outright instead.
+NICOCHAN_POINT = 1000000
+
 def ensure_jewels():
 
     try:
@@ -5119,7 +6742,8 @@ def ensure_jewels():
     uid = user_id()
     touched = 0
     for rid, amount in ((_row_id('item.jewel_free'), JEWEL_FREE),
-                        (_row_id('item.jewel_paid'), JEWEL_PAID)):
+                        (_row_id('item.jewel_paid'), JEWEL_PAID),
+                        ('item.nicochan_point', NICOCHAN_POINT)):
         hit = None
         for r in rows:
             if not isinstance(r, dict):
@@ -5260,10 +6884,28 @@ def _initial_furniture_ids():
         gs = master_tables().get('game_setting') or {}
         row = gs.get('game_setting.initial_furnitures') or {}
         ids.extend([x.strip() for x in str(row.get('Value') or '').split(',') if x.strip()])
-        for key in ('game_setting.homeset_default_back', 'game_setting.homeset_default_clock'):
+        # game_setting.init_bg lists the backgrounds a new account owns.  It was
+        # never granted, so the home-display screen listed those backgrounds (it
+        # reads masterdata) but selecting one made the ownership check below swap
+        # it for game_setting.homeset_default_back -- the player picked a stripe
+        # and got the default "inside the ship" background instead.
+        for key in ('game_setting.init_bg',
+                    'game_setting.homeset_default_back',
+                    'game_setting.homeset_default_clock'):
             v = str((gs.get(key) or {}).get('Value') or '').strip()
-            if v:
-                ids.append(v)
+            for _one in v.split(','):
+                _one = _one.strip()
+                if _one:
+                    ids.append(_one)
+
+        # Decoration that has NO obtain source in masterdata (nothing but the
+        # item table itself mentions it): wallpapers, backgrounds, clocks and
+        # home effects such as item.effect.5 (花びら) or .10 (フラワーシャワー).
+        # The official client still hands these out through its own gacha and
+        # event plumbing, so a case player would otherwise never see them --
+        # the category is pure cosmetics and touches no game balance.
+        # Same reasoning as item.nicochan_point in ensure_jewels().
+        ids.extend(DECO_FREE_IDS)
     except Exception:
         pass
     if not ids:
@@ -5276,6 +6918,262 @@ def _initial_furniture_ids():
             seen.add(i)
             out.append(i)
     return out
+
+def grant_starter_equipment():
+
+    # Weapons, tank parts and alternate costumes for a brand-new save.
+    # All three lists are the COMPLETE masterdata set for their category:
+    # the official starter flow ends up owning every weapon (161) and every
+    # part (71) after the tutorial, and the 29 alternate outfits are likewise
+    # all of them.  A case player would otherwise have to unlock each one by
+    # hand.
+    #
+    # Weapons and parts live in UserPossession; costumes are ordinary items
+    # (ItemTypeValue 21) so they go through _grant_item.
+    added = 0
+    for wid in STARTER_WEAPON_IDS:
+        try:
+            if _grant_weapon(wid):
+                added += 1
+        except Exception as e:
+            log('    starter weapon %s failed: %s' % (wid, e))
+    rows = db_get('UserPossession')
+    if isinstance(rows, list):
+        have = set(str(x.get('Id')) for x in rows if isinstance(x, dict))
+    else:
+        have = set()
+    for pid in STARTER_PART_IDS:
+        if pid in have:
+            continue
+        try:
+            if _grant_unlock_item(pid):
+                added += 1
+        except Exception as e:
+            log('    starter part %s failed: %s' % (pid, e))
+    for cid in STARTER_COSTUME_IDS:
+        try:
+            if _grant_item(cid, 1):
+                added += 1
+        except Exception as e:
+            log('    starter costume %s failed: %s' % (cid, e))
+    if added:
+        log('    starter equipment: granted %d row(s)' % added)
+    return added
+
+def grant_ending_presents_at_boot():
+
+    # Hand out the goodbye presents (天使隊集合写真その１〜４) automatically at
+    # startup, so a fresh save already owns them instead of having to open the
+    # epilogue first.  Idempotent: _grant_ending_presents() skips any RewardId
+    # that already has a Present row, so restarting never mints duplicates.
+    # Deliberately the same function the read-ending endpoint calls -- one place
+    # decides what the gifts are.
+    try:
+        added = _grant_ending_presents()
+    except Exception as e:
+        log('  ending presents: FAILED', e)
+        return 0
+    for p in added:
+        touch(p.get('Id'), p, 'Presents')
+    return len(added)
+
+def grant_mission_passes():
+
+    # A premium / special mission pass is bought through the DMM payment SDK,
+    # and that SDK talks over its own native connector (NetgameApiConnector),
+    # not UnityWebRequest -- so the plugin's URL rewrite never sees the payment
+    # call, it leaves for the real (now shut down) sdk-gameplayer.dmm.com and
+    # the purchase popup just hangs forever.  Granting the pass outright is the
+    # only route that works offline, and it is exactly equivalent: the client
+    # decides whether a track can be collected from these two booleans
+    # (MissionPassEntity.IsSpecial / IsPremium, offset 0x21, set by
+    # UnlockSpecial() / UnlockPremium()).
+    #
+    # Every event pass is granted, not just the current one, so a fresh save
+    # never runs into a locked track no matter which event the player opens.
+    # Idempotent: rows that are already unlocked are left alone.
+    try:
+        tbl = master_tables().get('mission_pass') or {}
+    except Exception:
+        tbl = {}
+    if not tbl:
+        return 0
+    events = []
+    for key in sorted(tbl):
+        row = tbl.get(key) or {}
+        ev = str(row.get('EventId') or '')
+        if ev and ev not in events:
+            events.append(ev)
+    if not events:
+        return 0
+    rows = db_get('MissionPass')
+    if not isinstance(rows, list):
+        rows = []
+    by_id = {}
+    for r in rows:
+        if isinstance(r, dict):
+            by_id[str(r.get('Id') or '')] = r
+    added = 0
+    for ev in events:
+        row = by_id.get(ev)
+        if row is None:
+            row = {'UserId': user_id(), 'Id': ev, 'PassExp': 0,
+                   'IsSpecial': False, 'IsPremium': False,
+                   'ReceivedLevel': {}, 'Ver': 0}
+            rows.append(row)
+            by_id[ev] = row
+        if row.get('IsSpecial') and row.get('IsPremium'):
+            continue
+        row['IsSpecial'] = True
+        row['IsPremium'] = True
+        row['Ver'] = int(row.get('Ver') or 0) + 1
+        added += 1
+    if added:
+        db_put('MissionPass', rows)
+        log('    mission passes: unlocked special+premium on %d event(s)' % added)
+    return added
+
+def _shampoo_ladder():
+
+    # shampoo_param.1.Records is the level-up ladder: each row's Lv is the level
+    # at which that row's Cost takes effect, and Cost is the price of ONE
+    # level-up while the current level sits in that band.  Lv 1 -> 100 covers
+    # levels 1..6, Lv 7 -> 100 covers 7..39, and so on.
+    tbl = (master_tables().get('shampoo_param') or {}).get('shampoo_param.1') or {}
+    out = []
+    for rec in (tbl.get('Records') or []):
+        try:
+            out.append((int(rec.get('Lv') or 0), int(rec.get('Cost') or 100)))
+        except Exception:
+            continue
+    out.sort()
+    return out
+
+def _shampoo_level_cost(level):
+
+    # Price of the single level-up that starts at `level` (FindShampooParamData:
+    # the row with the greatest Lv that is still <= level).
+    cost = 100
+    for lv, c in _shampoo_ladder():
+        if lv <= int(level):
+            cost = c
+        else:
+            break
+    return cost
+
+def _shampoo_total_cost(cur, target):
+
+    # Chorepan needed to walk from `cur` up to `target` (target itself is the
+    # level reached, so the range is [cur, target)).
+    try:
+        cur = int(cur)
+        target = int(target)
+    except Exception:
+        return 0
+    if target <= cur:
+        return 0
+    return sum(_shampoo_level_cost(lv) for lv in range(cur, target))
+
+def _shampoo_max_level():
+
+    ladder = _shampoo_ladder()
+    return ladder[-1][0] if ladder else 400
+
+def _lounge_level_row(create=False):
+
+    # The lounge facility levels all live in ONE UserPossession row whose Records
+    # is keyed by facility name (item_create / item_mixing / parameter_up /
+    # mogu_shampoo).  Returns (entire_rows_list, this_row).
+    rows = db_get('UserPossession')
+    if not isinstance(rows, list):
+        return None, None
+    for r in rows:
+        if isinstance(r, dict) and r.get('Id') == 'lounge.Interior_level':
+            return rows, r
+    if not create:
+        return rows, None
+    fresh = {'UserId': user_id(), 'Id': 'lounge.Interior_level',
+             'ReadFlag': False,
+             'Records': {'item_create': 1, 'item_mixing': 1,
+                         'parameter_up': 1, 'mogu_shampoo': 1},
+             'Ver': 1}
+    rows.append(fresh)
+    return rows, fresh
+
+def _ending_present_rows():
+
+    # The three goodbye presents the official server hands out when the player
+    # opens the epilogue: 天使隊集合写真その１/２/３ (oopart.126/127/128), each
+    # granted at the maximum plus roll.  Their Descriptions are the three
+    # farewell lines from game_setting.ending_1/2/3 -- read from masterdata so
+    # the text is never duplicated here.
+    #
+    # Order matters: その１ carries ending_1, その２ ending_2, その３ ending_3.
+    gs = (master_tables().get('game_setting') or {})
+    out = []
+    # その１/２/３ carry the three goodbye lines from game_setting.ending_1/2/3.
+    for idx, oid in enumerate(('oopart.126', 'oopart.127', 'oopart.128'), start=1):
+        row = gs.get('game_setting.ending_%d' % idx) or {}
+        text = str(row.get('Value') or '')
+        out.append({'RewardId': oid,
+                    'RewardParam': 'oopart_plus.max',
+                    'Count': 1,
+                    'Description': text})
+    # その４ (oopart.129) is the extra gift added on 2026-10-14.  Its line is
+    # NOT in game_setting -- there is no ending_4 -- so it cannot be read from
+    # masterdata the way the other three are.  The text below is the literal
+    # Description the live server sent with the present
+    # (recorded 2026-10-16, present.639277252790047048 -> oopart.129).
+    # NOTE: this is the SHORT present-box blurb, not the 360-character
+    # oopart.129.Description that the gallery shows.
+    _r129 = (master_tables().get('oopart') or {}).get('oopart.129') or {}
+    if _r129:
+        out.append({'RewardId': 'oopart.129',
+                    'RewardParam': 'oopart_plus.max',
+                    'Count': 1,
+                    'Description': '『コスモちゃん、イェーイ！' + chr(10) + '最高に輝いた笑顔と想い出をありがとう』'})
+    return out
+
+def _grant_ending_presents():
+
+    # Idempotent: build one Present row per 集合写真, using the same
+    # 'present.<19-digit ms timestamp><3-digit sequence>' shape the official
+    # rows use, and skip any that already exist.  Returns the rows that were
+    # added (so the caller can echo them back in SyncData).
+    gifts = _ending_present_rows()
+    if not gifts:
+        return []
+    rows = db_get('Present')
+    if not isinstance(rows, list):
+        rows = []
+    have = set(str(r.get('Id')) for r in rows if isinstance(r, dict))
+    # Refuse to hand them out twice: the retail rows are keyed by RewardId the
+    # same way, so a second read-ending must not mint duplicates.
+    have_rewards = set(str(r.get('RewardId')) for r in rows if isinstance(r, dict))
+    base = int(time.time() * 1000)
+    added = []
+    for i, g in enumerate(gifts):
+        if g['RewardId'] in have_rewards:
+            continue
+        pid = 'present.%d%03d' % (base + i, 200 + i)
+        if pid in have:
+            continue
+        row = {'UserId': user_id(), 'Id': pid,
+               'RewardId': g['RewardId'],
+               'RewardParam': g['RewardParam'],
+               'Count': int(g['Count']),
+               'Description': g['Description'],
+               'PostedAt': _now_iso(),
+               'ReceiveDeadLineAt': '',
+               'Received': False, 'ReceivedAt': '',
+               'Deleted': False, 'Ver': 0}
+        rows.append(row)
+        added.append(row)
+    if added:
+        db_put('Present', rows)
+        for p in added:
+            touch(p.get('Id'), p, 'Presents')
+    return added
 
 def grant_initial_furnitures():
 
@@ -5443,27 +7341,12 @@ class H(BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype='application/json; charset=utf-8'):
 
+
+
         if _DELAY_MS > 0 and str(getattr(self, 'path', '') or '').startswith('/api/'):
             time.sleep(_DELAY_MS / 1000.0)
 
-        if isinstance(body, dict):
-            try:
-                _sync_ch = body.get('Characters')
-                _all_ch = _sync_ch if isinstance(_sync_ch, list) and _sync_ch else db_get('Chara')
-                if isinstance(_all_ch, list):
-                    _own = owned_item_ids()
-                    _stripped = 0
-                    for _c in _all_ch:
-                        if not isinstance(_c, dict):
-                            continue
-                        _cs = _c.get('Costume')
-                        if _cs and str(_cs) not in _own:
-                            _c['Costume'] = None
-                            _stripped += 1
-                    if _stripped:
-                        log('    COSTUME-GUARD: %d unowned costume(s) -> null' % _stripped)
-            except Exception as _ce:
-                log('    COSTUME-GUARD failed: %s' % _ce)
+        # Chara.Costume 的"必须拥有"规则由 _fk_* 统一处理。
 
         _lp2 = str(getattr(self, 'path', '') or '').split('?')[0]
         if _lp2 == '/api/lounge/my' and isinstance(body, dict):
@@ -5546,6 +7429,11 @@ class H(BaseHTTPRequestHandler):
                        type(_bsd.get('UserBehavior')).__name__))
             except Exception as _le:
                 log('    LOUNGE-enter failed: %s' % _le)
+
+        try:
+            _oopart_pluses_tail(str(getattr(self, 'path', '') or '').split('?')[0], body)
+        except Exception as _ope:
+            log('    oopart pluses tail failed: %s' % _ope)
 
         try:
             body = _sync_value_guard(str(getattr(self, 'path', '') or '').split('?')[0], body)
@@ -5703,6 +7591,21 @@ class H(BaseHTTPRequestHandler):
                     return self._send(200, _raw, 'image/png')
             log('  Blog img MISSING', _leaf[:24])
             return self._send(404, {'error': 'blog image not found'})
+        if path.startswith('/res/v1/Web/html/') or path.startswith('/res/v1/web/html/'):
+            # game_setting.close_ios points at an HTML page on the CDN (the
+            # refund notice).  Served from server/Web/html/<hash>.html; a
+            # missing file must 404 rather than answer an empty 200, which
+            # the client treats as a corrupt download.
+            _leaf = path.rsplit('/', 1)[-1]
+            _safe = _leaf.replace('/', '').replace(chr(92), '')
+            _p = os.path.join(HERE, 'Web', 'html', _safe)
+            if _leaf and os.path.isfile(_p):
+                _raw = io.open(_p, 'rb').read()
+                if _raw:
+                    log('  Web html ->', _leaf[:20], len(_raw), 'bytes')
+                    return self._send(200, _raw, 'text/html; charset=utf-8')
+            log('  Web html MISSING', _leaf[:24])
+            return self._send(404, {'error': 'html not found'})
 
         if path.startswith('/res/v1/Web/txt/') or path.startswith('/res/v1/web/txt/'):
             _leaf = path.rsplit('/', 1)[-1]
@@ -5837,24 +7740,241 @@ class H(BaseHTTPRequestHandler):
                         _pt = int(_r.get('Count') or 0); break
             except Exception:
                 _pt = 0
+            # Field names must match DMM.Games.Client.Sdk.NetGameApiResult's
+            # backing fields exactly (verified in global-metadata.dat):
+            #   access_token / onetime_token / can_use_point / nickname /
+            #   payment_id / error_code / ErrorCodeStr
+            #
+            # error_code is the important one.  NetGameApiResult.IsSuccess() is
+            # literally `cmp dword ptr [rcx+10h], 0; sete al` -- success means
+            # ErrorCode == 0, and NetGameApiResult.Parse() stamps 113 (0x71) onto
+            # the instance when deserialisation comes back null.  A body without
+            # `error_code` is exactly that case, so the DMM SDK treated every
+            # reply as a failure; <Payment>d__11 then formatted
+            # 'pay_reward.payment errorcode = {0}' and threw, which is what left
+            # the purchase popup stuck.  Send the key explicitly, as 0.
             _resp = {
                 'access_token':  _tok,
                 'onetime_token': _ott,
                 'can_use_point': _pt,
                 'nickname':      _uname,
                 'payment_id':    '',
+                'error_code':    0,
+                'ErrorCodeStr':  '',
             }
             log('  DMM-BLOCKED', method, 'command=' + (_cmd or '(none)'),
                 '-> nickname=' + repr(_uname), 'point=' + str(_pt))
             return self._send(200, _resp)
 
+        # ---------------------------------------------------------------
+        # DMM SDK endpoints (Java side of the Android build).
+        #
+        # The Android client drives its DMM SDK over plain HTTPS, and the
+        # SDK talks a different dialect than the game API: RPC-style bodies
+        # ({params, command}) and envelopes with code/error_no/result.
+        # Without these the SDK reports INITIALIZE/10004 and the game never
+        # leaves its splash, which is what E1000 turned out to be.
+        #
+        # Shapes below were recovered by decompiling the SDK itself:
+        #   GetMaintenanceInfoApi  -> {'maintenance': MaintenanceInfoModel}
+        #   ConfigGetApi           -> MobileApiModel[ConfigGet.Entry]
+        #   DmmGamesMaintenance    -> maintenance == null means NOT in
+        #                             maintenance, and the caller then calls
+        #                             onSucceed(false, null) and proceeds.
+        # ---------------------------------------------------------------
+        if path.startswith('/user/profile/auto-register'):
+
+            # This is what error 10030 meant all along.  The SDK error enum
+            # (DmmGamesStoreSdkInitializeErrorCode) maps 10030 to
+            # PROFILE_AUTO_REGISTER_EXECUTION, and the SDK reports it on every
+            # boot until this call succeeds.  Decompiled contract:
+            #   POST /user/profile/auto-register
+            #   request  {device: 'android_app'}
+            #   response ProfileAutoRegisterResponseModel {games_id}
+            # (StoreWebApiErrorModel adds an optional 'error' object.)
+            _body_txt = body.decode('utf-8', 'replace')[:200] if body else ''
+            log('    AUTO-REGISTER', method, path, '| body=' + repr(_body_txt))
+            return self._send(200, {
+                'games_id': 'local-games-id-0001',
+                'error': None,
+            })
+        if path.startswith('/connect/v1/token'):
+
+            # OAuth token endpoint of the DMM AuthSDK.  Decompiled shape:
+            #   TokenResponse.Body { accessToken, tokenType, expiresIn,
+            #                        refreshToken, scope, idToken }
+            # The SDK stores accessToken and replays it as the Bearer value
+            # for later calls, so it must be non-empty or the SDK keeps
+            # treating the account as unauthenticated.
+            _t = 'localtoken0000000000000000000000'
+            log('    TOKEN-REQ', method, path,
+                '| body=' + repr(body.decode('utf-8', 'replace'))[:200])
+            return self._send(200, {
+                'header': {'resultCode': 0, 'responseId': 'local-token-0001'},
+                'body': {
+                    'accessToken': _t,
+                    'tokenType': 'Bearer',
+                    'expiresIn': 3600,
+                    'refreshToken': _t,
+                    'scope': 'openid',
+                    'idToken': _t,
+                },
+            })
+        if path.startswith('/connect/v1/issueSessionId'):
+
+            # Session handshake for the DMM AuthSDK.  Decompiled shape:
+            #   SessionIDResponse { header{resultCode,responseId},
+            #                      body{uniqueId,secureId} }
+            # and the SDK turns body into SessionID(secureId, uniqueId).
+            # ResultCode 0 is the SDK's success value; anything else is
+            # treated as a failed handshake and stops the login flow.
+            _uid = ''
+            try:
+                _uid = str((json.loads(body.decode('utf-8')) or {}).get('user_id') or '')
+            except Exception:
+                pass
+            if not _uid:
+                _uid = 'localuser000000000000'
+            return self._send(200, {
+                'header': {'resultCode': 0, 'responseId': 'local-' + _uid[:12]},
+                'body': {'uniqueId': _uid, 'secureId': user_id()},
+            })
+
+        if path == '/address-info' or path.startswith('/address-info'):
+
+            # Geo/address lookup performed during boot.  Empty but well-formed
+            # keeps the caller from treating a 404 as a fatal error.
+            return self._send(200, {'code': 'OK', 'error_no': 0,
+                                    'error_message': '', 'result': {}})
+        if path == '/' or path == '':
+
+            # The SDK probes the bare origin before/while initialising and
+            # treats a 404 as INITIALIZE failure (it reports error_number
+            # 10030 right after three GET / 404s).  Answer with a small,
+            # well-formed envelope so the probe succeeds.
+            log('    ROOT-PROBE', method, '-> OK')
+            return self._send(200, {'code': 'OK', 'error_no': 0,
+                                    'error_message': '', 'result': {}})
+        if path.startswith('/api/remote-data/'):
+
+            # Urban Airship remote-data.  The store app logs
+            #   'DMM GAMES STORE - UALib: Failed to parse json'
+            # when this returns a bare {} , because the SDK expects an
+            # object with a 'payloads' array.  Shapes recovered from the
+            # UA classes in the store APK (RemoteDataPayload with the
+            # fields type/timestamp/metadata/url for each entry).
+            # An empty payload list is a legitimate 'nothing to apply'
+            # answer and keeps the SDK happy.
+            log('    UA-REMOTE-DATA', path[:80])
+            return self._send(200, {'payloads': []})
+
+        if path.startswith('/api/channels/') or path.startswith('/api/contacts/'):
+
+            # Rest of the Urban Airship channel/contact API.  The store app
+            # probes these while taking off; a well-formed empty answer
+            # stops it from treating the SDK as unreachable.
+            log('    UA-CHANNEL', method, path[:80])
+            return self._send(200, {'ok': True, 'channel': {},
+                                    'payloads': []})
+        if path == '/maintenance' or path.startswith('/maintenance/'):
+
+            # null (not an object) is the 'we are open' signal; an object
+            # would pop the maintenance dialog and block startup forever.
+            return self._send(200, {'maintenance': None})
+
+        if path == '/log/sdk/usage':
+
+            # Telemetry.  Accept and discard; the SDK only checks the status.
+            return self._send(200, {'code': 'OK', 'error_no': 0,
+                                    'error_message': '', 'result': None})
+
+        if path.startswith('/service/freegame'):
+
+            # RPC endpoint.  The caller sends {params: {...}, command: 'X'};
+            # answer per command, wrapped in the mobile envelope.
+            _cmd = ''
+            try:
+                _req = json.loads(body.decode('utf-8')) if body else {}
+                _cmd = str((_req or {}).get('command') or '')
+            except Exception:
+                _req = {}
+
+            if _cmd == 'Config.Get':
+                # Only 'code: OK' is strictly required, but the SDK reads
+                # result.mente.flag and result.site, so provide a coherent
+                # 'open for business' payload rather than nulls.
+                return self._send(200, {
+                    'code': 'OK', 'error_no': 0, 'error_message': '',
+                    'result': {
+                        'mente': {'flag': 0, 'message': ''},
+                        'portalapp': {'community': '', 'rule': ''},
+                        'site': 'GENERAL',
+                        'social_api': {'endpoint': '', 'host': '', 'scheme': ''},
+                        'title': {},
+                        'webview': {},
+                    },
+                })
+
+            log('  SDK rpc', _cmd or '(none)', '-> generic OK')
+            return self._send(200, {'code': 'OK', 'error_no': 0,
+                                    'error_message': '', 'result': {}})
+
+        if path == '/wyvrn/Synapse':
+
+            # Analytics beacon seen right after boot; nothing to persist.
+            return self._send(200, {'code': 'OK', 'error_no': 0,
+                                    'error_message': '', 'result': None})
+
+        if path == '/api/app/ev/multi_boot':
+
+            # Client-side boot event; acknowledge so the caller stops retrying.
+            return self._send(200, empty_sync())
         if path == '/api/web/version':
 
             return self._send(200, {
-                'A':'1.72.1','R':'1.72.3',
-                'H':'27f3577e92d725f410e27526a0e8d44fcd02dcc8cc984d1d59dc28e644f5eaed',
-                'M':'2026.0918.1253','T':'0.0.1','I':'','P':'','S':'','CF':''})
+                'A':APP_VERSION,'R':RESOURCE_VERSION,
+                'H':CATALOG_H_PUB,
+                'M':MASTERDATA_VERSION,'T':'0.0.1','I':'','P':'','S':'','CF':''})
 
+        if path.startswith('/api/auth/'):
+
+            # Auth namespace.  The Android build walks it differently than the
+            # PC build: instead of /api/auth/login-player it calls
+            # /api/auth/device (GET, no body) and then keeps polling it when the
+            # reply is not usable.  Log the full request so the expected shape
+            # can be recovered from a real run instead of being guessed.
+            log('    AUTH-REQ', method, path,
+                '| cookie=' + repr(self.headers.get('Cookie'))[:160],
+                '| ua=' + repr(self.headers.get('User-Agent'))[:80],
+                '| auth=' + repr(self.headers.get('Authorization'))[:80],
+                '| x-device=' + repr(self.headers.get('X-Device-Id'))[:60])
+
+            if path == '/api/auth/device':
+
+                # Urban Airship device/channel registration -- NOT the game
+                # login.  The store app logs
+                #   'DMM GAMES STORE - UALib: Failed to parse json'
+                # whenever this does not look like a UA channel payload, and
+                # a failed UA take-off is enough to stall the store app's
+                # authentication screen.  Field names were taken from the UA
+                # classes inside the store APK.
+                log('    UA-DEVICE-REG', method, path)
+                return self._send(200, {
+                    'channel_id': 'local-ua-channel-0001',
+                    'device_token': 'local-ua-device-token-0001',
+                    'app_key': 'local-ua-app-key',
+                    'alias': None,
+                    'tags': [],
+                    'tag_groups': {},
+                    'attributes': {},
+                    'named_user_id': None,
+                    'device_type': 'android',
+                    'opted_in': True,
+                    'background': False,
+                    'created': '2026-10-14T00:00:00',
+                })
+
+            return self._send(200, {})
         if path == '/api/auth/login-player':
 
             sess = {'UserId':user_id(), 'Id':'localsession0001',
@@ -6069,6 +8189,21 @@ class H(BaseHTTPRequestHandler):
                 seed_challenge_missions()
                 data = db_get(name)
 
+            if name in ('UniqueQuest', 'UniqueQuests'):
+                if seed_unique_quest():
+                    data = db_get(name)
+                elif not isinstance(data, list):
+                    data = []
+
+            if name == 'Chara' and isinstance(data, list):
+                _wfix = _migrate_chara_weapon(data)
+                if _wfix:
+                    try:
+                        db_put('Chara', data)
+                        log('    chara: split %d legacy Weapon object(s) into Weapon/WS' % _wfix)
+                    except Exception as _e:
+                        log('    chara weapon migration persist failed: %s' % _e)
+
             if path == '/api/shop/hold':
                 data = _inject_shop_entities(data)
 
@@ -6149,6 +8284,24 @@ class H(BaseHTTPRequestHandler):
                     if inner is not None:
                         log('  unwrap', UNWRAP[path], 'for', path)
                         data = inner
+
+            if path in ('/api/mission/list', '/api/challenge-mission/list'):
+
+                # This endpoint is served straight from Mission.json, which is NOT
+                # one of the ACTIVITY_BEHAVIOR paths, so nothing would otherwise
+                # roll the period over.  Without this a new day kept the previous
+                # day's State=3 ('already received') rows, so the client drew every
+                # daily mission as CLEAR! and refused a second claim.  The reset
+                # itself lives in _behavior_rollover(); calling it here also
+                # refreshes DailyAt / DailyRecords in the same pass.
+                try:
+                    _brow2, _brows2 = _behavior_row()
+                    if _behavior_rollover(_brow2):
+                        _brow2['Ver'] = int(_brow2.get('Ver') or 0) + 1
+                        db_put('UserBehavior', _brows2 if _brows2 is not None else _brow2)
+                    data = db_get(name)
+                except Exception as _mre:
+                    log('    mission rollover failed: %s' % _mre)
 
             if path in LIST_API and isinstance(data, dict):
                 log('  shape', 'list endpoint but db value is object -> serving []', path)
@@ -6246,6 +8399,41 @@ class H(BaseHTTPRequestHandler):
                 log('    present/campaign -> granted %d starter furniture(s)' % _furn)
             return self._send(200, flush_touched(empty_sync()))
 
+        if path == '/api/user-possession/read-ending':
+
+            # Opening the epilogue.  The official server answers with a SyncData
+            # that carries BOTH the three 天使隊集合写真 presents and a new
+            # UserPossession row named 'read_ending' -- that row is what
+            # UserPossessionFacade.IsReadEnding() tests for, so it is what the
+            # client uses to decide whether the epilogue has been seen yet.
+            # Request body is empty (reqBytes: 0 in the capture).
+            _added = []
+            try:
+                _added = _grant_ending_presents()
+            except Exception as _ee:
+                log('    read-ending presents failed: %s' % _ee)
+
+            try:
+                _prs = db_get('UserPossession')
+                if not isinstance(_prs, list):
+                    _prs = []
+                _row = None
+                for _x in _prs:
+                    if isinstance(_x, dict) and _x.get('Id') == 'read_ending':
+                        _row = _x
+                        break
+                if _row is None:
+                    _row = {'UserId': user_id(), 'Id': 'read_ending',
+                            'ReadFlag': True, 'Records': None, 'Ver': 1}
+                    _prs.append(_row)
+                    db_put('UserPossession', _prs)
+                    touch('read_ending', _row, 'UserPossession')
+            except Exception as _re:
+                log('    read-ending flag failed: %s' % _re)
+
+            log('    read-ending -> %d present(s) + read_ending row' % len(_added))
+            return self._send(200, flush_touched(empty_sync()))
+
         if path.startswith('/api/present/'):
 
             try:
@@ -6255,7 +8443,15 @@ class H(BaseHTTPRequestHandler):
             rows = db_get('Present')
             if not isinstance(rows, list):
                 rows = []
-            ids = req.get('PresentIds') or req.get('presentIds')
+            # ★ The client sends {"Presents": [<present id>, ...]}
+            # (PresentReceiveMultipleRequestData.get_Presents).  The old code
+            # only looked for 'PresentIds' / 'PresentId', so the list always
+            # came back None -- and because the filter below is written as
+            # 'if ids and ...', a None list meant "receive EVERY pending
+            # present".  Picking one item in the box therefore collected all
+            # of them.  Keep the old spellings as fallbacks for safety.
+            ids = (req.get('Presents') or req.get('presents')
+                   or req.get('PresentIds') or req.get('presentIds'))
             if not ids:
                 pid = req.get('PresentId') or req.get('presentId')
                 ids = [pid] if pid else None
@@ -6267,7 +8463,12 @@ class H(BaseHTTPRequestHandler):
                     continue
                 if ids and p.get('Id') not in ids:
                     continue
-                _grant_reward(p.get('RewardId'), int(p.get('Count') or 1))
+                # ★ RewardParam must travel with the reward: the three
+                # 天使隊集合写真 presents carry 'oopart_plus.max', and dropping
+                # it would hand the player a bare oopart with every plus stat at
+                # 0 instead of the fully-rolled one the official server gives.
+                _grant_reward(p.get('RewardId'), int(p.get('Count') or 1),
+                              p.get('RewardParam'))
                 p['Received'] = True
                 p['ReceivedAt'] = _now_iso()
                 p['Ver'] = int(p.get('Ver') or 0) + 1
@@ -6811,10 +9012,22 @@ class H(BaseHTTPRequestHandler):
                     _rar = int(_m.get('Rarity') or 0)
                     _scap = 7 if _rar >= 4 else (5 if _rar == 3 else (3 if _rar == 2 else 0))
                     _cur = int(ent.get('SkillLevel') or 1)
-                    if _scap and _cur < _scap:
+                    # oopart_skill_level.<oopartId> lists the materials for
+                    # each target level; the gold is sent by the client as
+                    # UseGold but the items are not, so they must be charged
+                    # here (official sample: OopartsEnhancements_1 568 -> 560).
+                    _os_gold = int(req.get('UseGold') or req.get('useGold') or 0)
+                    _os_mats = _oopart_skill_material_cost(oid, _cur + 1)
+                    _os_ok, _os_paid = _pay_materials(_os_mats)
+                    if not _os_ok:
+                        log('    oopart/enhance-skill %s REFUSED: insufficient materials for %s'
+                            % (oid, _os_mats))
+                    elif _scap and _cur < _scap and _spend_gold(_os_gold):
                         ent['SkillLevel'] = _cur + 1
-                        log('    oopart/enhance-skill %s %d -> %d (cap %d, %d*)'
-                            % (oid, _cur, ent['SkillLevel'], _scap, _rar))
+                        _oss = (' + %s' % ', '.join('%s x%d' % (i, n)
+                                                    for i, n in _os_paid)) if _os_paid else ''
+                        log('    oopart/enhance-skill %s %d -> %d (cap %d, %d*, gold %d%s)'
+                            % (oid, _cur, ent['SkillLevel'], _scap, _rar, _os_gold, _oss))
                     else:
                         log('    oopart/enhance-skill %s REFUSED: %d at cap %d (%d*)'
                             % (oid, _cur, _scap, _rar))
@@ -6844,7 +9057,15 @@ class H(BaseHTTPRequestHandler):
 
                         _floor = int(_eplus.get('Min') or 0)
                         _before = int(ent.get(key) or 0)
-                        if _before >= _cap:
+                        # オルガノン注入 unlocks only when the oopart sits at the
+                        # maximum level for its rarity; the stat being raised must
+                        # additionally already hold that stat's Min plus value.
+                        _lv_now = int(ent.get('Level') or 1)
+                        _lv_max = _oopart_max_level(oid, ent.get('LimitOver') or 0)
+                        if _lv_max and _lv_now < _lv_max:
+                            log('    oopart/enhance-plus %s REFUSED: level %d < max %d'
+                                % (oid, _lv_now, _lv_max))
+                        elif _before >= _cap:
 
                             log('    oopart/enhance-plus %s %s already MAX (%d), refused'
                                 % (oid, key, _before))
@@ -6979,26 +9200,92 @@ class H(BaseHTTPRequestHandler):
                 if eid and ent.get('Id') != eid:
                     continue
                 if path.endswith('unlock-level'):
+
+                    # The client's MissionPassEntity has no UnlockedLevel member.
+                    # A purchase flips IsSpecial / IsPremium; the level itself is
+                    # derived from PassExp (Level = PassExp / 100, capped by the
+                    # number of rows in the master table).  RequestData carries only
+                    # EventId + Level, so the level tells us WHICH track was bought:
+                    # 2 = premium, 1 = special, anything else -> premium.
                     lv = int(req.get('Level') or req.get('level') or 0)
-                    if lv > 0:
-                        ent.setdefault('UnlockedLevel', 0)
-                        ent['UnlockedLevel'] = max(int(ent.get('UnlockedLevel') or 0), lv)
-                        ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                        touch(ent.get('Id'), ent, 'MissionPasses')
-                        done += 1
+                    if lv == 1:
+                        ent['IsSpecial'] = True
+                    elif lv >= 2 or lv == 0:
+                        ent['IsPremium'] = True
+                    ent['Ver'] = int(ent.get('Ver') or 0) + 1
+                    touch(ent.get('Id'), ent, 'MissionPasses')
+                    done += 1
                 else:
 
+                    # Receive every level the player has actually reached.
+                    #   * the reward column is PassRewards[] (a list of
+                    #     {Id, Param, Count}), NOT RewardId -- reading RewardId
+                    #     is why this used to hand out nothing at all.
+                    #   * the ceiling is PassExp / PASS_EXP_PER_LEVEL, taken
+                    #     from MissionPassConst..cctor ([rcx] = 100).
+                    #   * ReceivedLevel is keyed by '<passType>_<level>' so the
+                    #     free / special / premium tracks never collide.
                     recv = ent.get('ReceivedLevel')
                     if not isinstance(recv, dict):
                         recv = {}
-                    master = (master_tables().get('mission_pass') or {}).get(ent.get('Id')) or {}
-                    for r in (master.get('Records') or []):
-                        no = str(r.get('Level') or r.get('No') or '')
-                        if not no or no in recv:
+                    # The save row is keyed by EVENT id ('event.10019') while the
+                    # master rows are keyed by pass ('missionpass.10019_free' /
+                    # '_special' / '_premium'), so the row id can never be used as
+                    # the master key -- that mismatch is why this handed out
+                    # nothing.  Collect every track whose EventId matches.
+                    evid = str(ent.get('Id') or '')
+                    _mptbl = master_tables().get('mission_pass') or {}
+                    tracks = []
+                    for _mk in sorted(_mptbl):
+                        _mrow = _mptbl.get(_mk) or {}
+                        if str(_mrow.get('EventId') or '') != evid:
                             continue
-                        if r.get('RewardId'):
-                            _grant_reward(r.get('RewardId'), int(r.get('Count') or 1))
-                        recv[no] = 1
+                        tracks.append(_mrow)
+                    _pe = int(ent.get('PassExp') or 0)
+                    _reached = _pe // PASS_EXP_PER_LEVEL
+                    granted = 0
+                    for master in tracks:
+                        ptype = int(master.get('MissionPassType') or 0)
+
+                        # The free track is always owned; the other two need a pass.
+                        if ptype == 1 and not ent.get('IsSpecial'):
+                            continue
+                        if ptype == 2 and not ent.get('IsPremium'):
+                            continue
+                        recs = master.get('Records') or []
+                        _maxlv = max([int(r.get('Level') or 0) for r in recs] or [0])
+                        _cap = _reached if _reached < _maxlv else _maxlv
+                        # ReceivedLevel maps the pass type to the HIGHEST
+                        # level already collected on that track -- it is the
+                        # key that must be a string, not the level.  Proved by
+                        # MissionPassEntity.Receive(): it runs
+                        # Number.FormatInt32(passType) and uses that as the
+                        # dictionary key, storing the level as the value;
+                        # GetReceivedLevel() does the same conversion and a
+                        # single TryGetValue.  Writing '0_7'-style keys made
+                        # the client see every reward as unclaimed, which is
+                        # why the collect button stayed lit.
+                        key = str(ptype)
+                        _done = int(recv.get(key) or 0)
+                        _best = _done
+                        for r in recs:
+                            lv = int(r.get('Level') or 0)
+                            if lv <= 0 or lv > _cap:
+                                continue
+                            if lv <= _done:
+                                continue
+                            for pr in (r.get('PassRewards') or []):
+                                if not isinstance(pr, dict):
+                                    continue
+                                rid = pr.get('Id')
+                                if not rid:
+                                    continue
+                                _grant_reward(rid, int(pr.get('Count') or 1), pr.get('Param'))
+                                granted += 1
+                            if lv > _best:
+                                _best = lv
+                        if _best > _done:
+                            recv[key] = _best
                     ent['ReceivedLevel'] = recv
                     ent['Ver'] = int(ent.get('Ver') or 0) + 1
                     touch(ent.get('Id'), ent, 'MissionPasses')
@@ -7202,9 +9489,24 @@ class H(BaseHTTPRequestHandler):
             mem = req.get('Members') or req.get('members')
             if isinstance(mem, list):
                 ent['Members'] = mem
-            nm = req.get('Name') or req.get('name')
+            # The client sends the team name as `TeamName`, not `Name`
+            # (official body: {"TeamId":"team.3","TeamName":"部隊33",
+            # "Members":[...]}).  Reading only `Name` left ent['Name'] empty,
+            # so the UI kept showing the default 部隊N placeholder.
+            nm = (req.get('TeamName') or req.get('teamName')
+                  or req.get('Name') or req.get('name'))
             if nm is not None:
-                ent['Name'] = nm
+                ent['Name'] = str(nm)
+            # Settings 与 FragmentId 也是这个端点携带的（官方请求体：
+            # {"TeamId":..,"TeamName":..,"Members":[..],"Settings":[],"FragmentId":"fragment.9"}）。
+            # 之前只写了 Members/Name，队伍的神装槽（FragmentId）永远是 null，
+            # 客户端因此把「装上的神装」当成没装。
+            st = req.get('Settings') or req.get('settings')
+            if isinstance(st, list):
+                ent['Settings'] = st
+            fid = (req.get('FragmentId') or req.get('fragmentId'))
+            if fid is not None:
+                ent['FragmentId'] = str(fid) if fid else None
             ent['Ver'] = int(ent.get('Ver') or 0) + 1
             db_put('Team', rows)
             touch(tid, ent, 'Teams')
@@ -7330,6 +9632,17 @@ class H(BaseHTTPRequestHandler):
                             except Exception as _e:
                                 log('    tutorial grant %s failed: %s' % (_cid, _e))
                         log('    tutorial step 5 -> granted %d character(s)' % len(_cnt))
+                        # The opening ten-pull is where a new player first owns
+                        # characters, so it is also where the profile card gets
+                        # set (same idea as the home-screen block just below).
+                        # Without this the card stays empty and the profile page
+                        # aborts with a NullReferenceException.
+                        _first_new = ''
+                        for _c in _tc:
+                            _first_new = str(_c)
+                            break
+                        if _first_new:
+                            _set_profile_defaults(_first_new)
                     u['TCharas'] = []
 
                     _grant_reward('item.gold', 7000)
@@ -7608,6 +9921,51 @@ class H(BaseHTTPRequestHandler):
                 log('    shop/celeb-cycle-benefits -> Count=0')
                 return self._send(200, {'SyncData': flush_touched(empty_sync()),
                                        'Count': 0})
+
+            # ---- Mission pass purchases -------------------------------------
+            # A premium/special pass is not a ShopHold row: /api/shop/hold only
+            # ever carries shop_museum_* and shop_pack.* (the official capture
+            # and our save both hold exactly those 19 ids), so the lookup below
+            # always missed and the purchase was silently acknowledged.
+            # The real link is the other way round -- mission_pass rows carry a
+            # ShopMissionId, and shop_mission.<x> names the track that gets
+            # bought.  Flipping IsSpecial / IsPremium on the pass row is the
+            # whole effect; the client derives the level from PassExp itself.
+            _mpsid = str(sid or '')
+            if _mpsid.startswith('shop_mission.'):
+                _mprows = _rows('MissionPass')
+                _mpmaster = master_tables().get('shop_mission') or {}
+                _mpdef = _mpmaster.get(_mpsid) or {}
+                try:
+                    _mptype = int(_mpdef.get('MissionPassType') or 0)
+                except Exception:
+                    _mptype = 0
+                _mpevid = ''
+                for _k in (master_tables().get('mission_pass') or {}):
+                    _cand = (master_tables().get('mission_pass') or {}).get(_k) or {}
+                    if str(_cand.get('ShopMissionId') or '') == _mpsid:
+                        _mpevid = str(_cand.get('EventId') or '')
+                        break
+                _mpgot = 0
+                for _mp in _mprows:
+                    if not isinstance(_mp, dict):
+                        continue
+                    if _mpevid and str(_mp.get('Id') or '') != _mpevid:
+                        continue
+                    if _mptype == 1:
+                        _mp['IsSpecial'] = True
+                    elif _mptype == 2:
+                        _mp['IsPremium'] = True
+                    else:
+                        continue
+                    _mp['Ver'] = int(_mp.get('Ver') or 0) + 1
+                    touch(_mp.get('Id'), _mp, 'MissionPasses')
+                    _mpgot += 1
+                if _mpgot:
+                    db_put('MissionPass', _mprows)
+                log('    %s %s -> mission pass type %s, %d row(s) unlocked'
+                    % (path, _mpsid, _mptype, _mpgot))
+                return self._send(200, flush_touched(empty_sync()))
             sh = db_get('ShopHold')
             recs = (sh or {}).get('Records') if isinstance(sh, dict) else None
             hit = None
@@ -8407,11 +10765,27 @@ class H(BaseHTTPRequestHandler):
                     for _k, _v in layout.items():
                         if _k in ('randomIds', 'costumeIds'):
                             _ids = [s.strip() for s in str(_v or '').split(',') if s.strip()]
-                            _keep = [s for s in _ids if s in _owned]
-                            _dropped.extend([s for s in _ids if s not in _owned])
+                            # Same rule as the scalar branch below: a
+                            # chara_costume.<n>.1 entry is the angel's DEFAULT
+                            # outfit, usable as soon as the player owns the
+                            # character -- it is never an item row, so it must
+                            # not be filtered out as 'unowned'.
+                            _keep = [s for s in _ids
+                                     if (not s.startswith('item.')) or s in _owned]
+                            _dropped.extend([s for s in _ids
+                                             if s.startswith('item.') and s not in _owned])
                             _clean[_k] = ','.join(_keep)
                         elif isinstance(_v, str) and _v:
-                            if _v in _owned:
+                            # Only item.* ids are things the player OWNS.  The
+                            # lounge layout also stores cosmetics that are
+                            # static master data -- above all the angel stands
+                            # (chara_costume.<n>.1), which are never granted as
+                            # items: owning the CHARACTER is what makes its
+                            # default costume usable.  Dropping them made the
+                            # 喫茶 'angel placement' screen lose every pick, so
+                            # the selection could never be saved.  Same rule as
+                            # save_home_setting().
+                            if (not _v.startswith('item.')) or _v in _owned:
                                 _clean[_k] = _v
                             else:
                                 _dropped.append(_v)
@@ -8509,7 +10883,7 @@ class H(BaseHTTPRequestHandler):
                             _lv_row['Ver'] = int(_lv_row.get('Ver') or 0) + 1
 
                             db_put('UserPossession', _lv_rows)
-                            touch('lounge.Interior.level', _lv_row, 'UserPossession')
+                            touch('lounge.Interior_level', _lv_row, 'UserPossession')
                             log('    enhance-interior %s Lv%s -> Lv%s  (-%s %s, -%s %s, -%s gold)'
                                 % (_track, _cur, _newlv, _cnum, _cid,
                                    _onum, _oid, _gold))
@@ -8520,6 +10894,60 @@ class H(BaseHTTPRequestHandler):
 
             _sync = flush_touched(empty_sync())
             return self._send(200, _sync)
+
+        if path == '/api/lounge/enhance-param':
+            req = _req_json(body)
+            _st = str((req or {}).get('Status') or (req or {}).get('status') or '')
+            _err = None
+            try:
+                _pr_rows = db_get('UserPossession') or []
+                _pr_row = None
+                for _r in _pr_rows:
+                    if isinstance(_r, dict) and _r.get('Id') == 'lounge.Interior_level':
+                        _pr_row = _r
+                        break
+                if _pr_row is None:
+                    _err = 'no lounge.Interior_level row'
+                elif not _st:
+                    _err = 'no Status in request'
+                else:
+                    _precs = _pr_row.get('Records')
+                    if not isinstance(_precs, dict):
+                        _precs = {}
+                        _pr_row['Records'] = _precs
+                    # 'param_up.<status>' is a LEVEL counter and an absent key means
+                    # level 1: LoungeConst declares the six keys ('param_up.hp' /
+                    # .attack / .defence / .magical_defence / .agility / .critical)
+                    # and the lounge_param_up.<status> ladder has 24 rows that take
+                    # the stat from Lv2 to Lv25.
+                    #   => absent == Lv1 => the default must be 1, not 0.
+                    # With 0 we asked for the cost of "level 1", which
+                    # _lounge_param_up_cost resolves as idx = 1-2 = -1 => out of
+                    # range => ([], 0) => 'no cost row ... level 1', so the click
+                    # neither charged anything nor changed anything.
+                    _pkey = 'param_up.%s' % _st
+                    _pcur = int(_precs.get(_pkey) or 1)
+                    _pmats, _pgold = _lounge_param_up_cost(_st, _pcur + 1)
+                    if not _pmats and not _pgold:
+                        _err = 'no cost row for %s level %s' % (_st, _pcur + 1)
+                    else:
+                        _okp, _paidp = _pay_materials(_pmats)
+                        if not _okp:
+                            _err = 'insufficient materials for %s' % (_pmats,)
+                        elif _pgold and not _spend_gold(_pgold):
+                            _err = 'not enough gold (%s)' % _pgold
+                        else:
+                            _precs[_pkey] = _pcur + 1
+                            _pr_row['Ver'] = int(_pr_row.get('Ver') or 0) + 1
+                            db_put('UserPossession', _pr_rows)
+                            touch('lounge.Interior_level', _pr_row, 'UserPossession')
+                            log('    enhance-param %s %d -> %d (-%s, -%s gold)'
+                                % (_st, _pcur, _pcur + 1, _paidp, _pgold))
+            except Exception as _pe:
+                _err = str(_pe)[:80]
+            if _err:
+                log('    enhance-param REFUSED: %s' % _err)
+            return self._send(200, flush_touched(empty_sync()))
 
         if path == '/api/lounge/good':
             req = _req_json(body)
@@ -8552,19 +10980,76 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, _sync)
 
         if path == '/api/lounge/mogu-shampoo':
-            req = _req_json(body)
+
+            # Feeding シャンプーくん.  Request is IntAndCountRequestData:
+            #   Id    = あげる回数 -- HOW MANY TIMES to feed, not a target level.
+            #   Count = always 0; the client never sends the chorepan amount.
+            #
+            # Evidence that Id is a COUNT (the client is authoritative here):
+            #   * the popup shows 「あげる回数：1 / 1」 and sends Id=1 -- they match;
+            #   * MoguShampooContext exposes Level / UseCount / TotalCount but has
+            #     NO target-level field at all, so the popup has no "target" to
+            #     send; UseCount (+0x20) is what the slider drives;
+            #   * feeding N times raises the level by N (Lv10 + 1 feed -> Lv11),
+            #     which is exactly what 「Lv 10 » 11」 with 1/1 shows.
+            # An earlier revision of this handler read Id as an absolute target
+            # level, so a legitimate Id=1 was refused whenever the pet was past
+            # Lv1 -- the player could not feed it at all.
+            req = _req_json(body) or {}
             try:
-                _mid = int((req or {}).get('Id') or 1)
+                _times = int(req.get('Id') or 0)
             except Exception:
-                _mid = 1
-            _COST = 100
+                _times = 0
+            if _times <= 0:
+                # Some callers put the count in Count instead; accept either, but
+                # never invent one.
+                try:
+                    _times = int(req.get('Count') or 0)
+                except Exception:
+                    _times = 0
             try:
-                _have = _have_item('item.mogu_shampoo')
-                if _have < _COST:
-                    log('    mogu-shampoo REFUSED: have %s < %s' % (_have, _COST))
+                _rows, _row = _lounge_level_row(create=True)
+                if not isinstance(_row, dict) or not isinstance(_rows, list):
+                    log('    mogu-shampoo: lounge.Interior_level row unavailable')
+                elif _times <= 0:
+                    log('    mogu-shampoo REFUSED: no feed count in request %r' % (req,))
                 else:
-                    _consume_item('item.mogu_shampoo', _COST, strict=False)
-                    log('    mogu-shampoo Id=%s  (-%s mogu_shampoo)' % (_mid, _COST))
+                    _recs = _row.get('Records')
+                    if not isinstance(_recs, dict):
+                        _recs = {}
+                        _row['Records'] = _recs
+                    try:
+                        _cur = int(_recs.get('mogu_shampoo') or 1)
+                    except Exception:
+                        _cur = 1
+                    _maxlv = _shampoo_max_level()
+                    # Feed one step at a time so the price follows the ladder as
+                    # the level climbs (a single flat price per feed would over-
+                    # charge across a band boundary).
+                    _done = 0
+                    _spent = 0
+                    for _ in range(_times):
+                        if _cur >= _maxlv:
+                            break
+                        _cost = _shampoo_level_cost(_cur)
+                        if _have_item('item.mogu_shampoo') < _cost:
+                            break
+                        _consume_item('item.mogu_shampoo', _cost, strict=False)
+                        _spent += _cost
+                        _cur += 1
+                        _done += 1
+                    if _done:
+                        _recs['mogu_shampoo'] = _cur
+                        _row['Ver'] = int(_row.get('Ver') or 0) + 1
+                        db_put('UserPossession', _rows)
+                        touch('lounge.Interior_level', _row, 'UserPossession')
+                        log('    mogu-shampoo fed %d/%d time(s) -> Lv %d  (-%d chorepan, %d left)'
+                            % (_done, _times, _cur, _spent,
+                               _have_item('item.mogu_shampoo')))
+                    else:
+                        log('    mogu-shampoo REFUSED: fed 0/%d (Lv %d/%d, chorepan %d)'
+                            % (_times, _cur, _maxlv,
+                               _have_item('item.mogu_shampoo')))
             except Exception as _me:
                 log('    mogu-shampoo failed: %s' % _me)
 
@@ -8666,23 +11151,83 @@ class H(BaseHTTPRequestHandler):
                 _sent = _orb_box_entity(_srows)
                 _sslots = _sent.get('Slots') or {}
                 _was_remove = path.startswith('/api/item/remove')
+
+                # slotNo == -1 is the PREMIUM box path.  OrbBoxChangePopup's
+                # SubmitAction hard-codes 0xFFFFFFFF (ISIL `Move rcx, 0xFFFFFFFF`)
+                # when the popup was opened through ShowSp, i.e.
+                #   POST /api/item/open-orb {"Id":-1,"Count":N}
+                # means "spend N プレミアムキー to open N premium boxes from
+                # PSlots".  Treating it as an ordinary slot number found nothing,
+                # returned an empty reward list, and left the popup stuck forever.
+                if (not _was_remove) and any(n < 0 for n in _slot_nos):
+                    _want = max(1, int(req.get('Count') or 1))
+                    _pkeys = _have_item('item.orb_pkey')
+                    _pslots = _sent.get('PSlots') or []
+                    _avail = 0
+                    for _v in _pslots:
+                        if isinstance(_v, dict) and _v.get('Id'):
+                            _avail += max(1, int(_v.get('Count') or 1))
+                    _n_open = min(_want, _pkeys, _avail)
+                    if _n_open <= 0:
+                        log('    open-orb premium: nothing to open (want %d, keys %d, boxes %d)'
+                            % (_want, _pkeys, _avail))
+                        return self._send(200, {'SyncData': flush_touched(empty_sync()),
+                                                'Rewards': [],
+                                                'OrbBox': _orb_box_entity(_srows)})
+                    _consume_item('item.orb_pkey', _n_open, strict=False)
+                    _prewards = []
+                    _pleft = _n_open
+                    _pkeep = []
+                    for _v in _pslots:
+                        if not isinstance(_v, dict):
+                            continue
+                        _vc = max(1, int(_v.get('Count') or 1))
+                        if _pleft > 0 and _v.get('Id'):
+                            _use = min(_pleft, _vc)
+                            _rw, _k, _r = _roll_box_rewards(_v.get('Id'), _use)
+                            _prewards.extend(_rw)
+                            _pleft -= _use
+                            _vc -= _use
+                        if _vc > 0:
+                            _nv = dict(_v)
+                            _nv['Count'] = _vc
+                            _pkeep.append(_nv)
+                    _sent['PSlots'] = _pkeep
+                    _sent['Ver'] = int(_sent.get('Ver') or 0) + 1
+                    _orb_slot_sync(_sent)
+                    db_put('OrbBox', _srows)
+                    _mark_orb_box_changed()
+                    log('    open-orb premium: opened %d box(es), %d reward(s) (keys left %d)'
+                        % (_n_open, len(_prewards), _have_item('item.orb_pkey')))
+                    _prrows = _orb_box_rows()
+                    _prent = _orb_box_entity(_prrows)
+                    db_put('OrbBox', _prrows)
+                    return self._send(200, {'SyncData': flush_touched(empty_sync()),
+                                           'Rewards': _prewards, 'OrbBox': _prent})
+
                 _picked = [(n, _sslots[str(n)]) for n in _slot_nos
                            if isinstance(_sslots.get(str(n)), dict)]
                 _cost = max(0, int(_cost or 0))
 
-                if not _was_remove and _cost > 0:
-                    if not _spend_jewels(_cost, path):
-                        return self._send(200, {
-                            'SyncData': flush_touched(empty_sync()),
-                            'Rewards': [], 'OrbBox': _orb_box_entity(_srows)})
+                # Resolve the slots BEFORE charging anything.  Charging first
+                # meant a request naming a slot we do not hold (e.g. the -1 the
+                # premium-key popup sends) silently consumed the jewels and
+                # returned an empty reward list, which leaves the client stuck on
+                # its "opening" popup forever.
                 if not _picked:
-                    log('    %s: no such slot(s) %s' % (path, _slot_nos))
+                    log('    %s: no such slot(s) %s (nothing charged)'
+                        % (path, _slot_nos))
 
                     if _was_remove:
                         return self._send(200, _orb_box_entity(_srows))
                     return self._send(200, {'SyncData': flush_touched(empty_sync()),
                                            'Rewards': [],
                                            'OrbBox': _orb_box_entity(_srows)})
+                if not _was_remove and _cost > 0:
+                    if not _spend_jewels(_cost, path):
+                        return self._send(200, {
+                            'SyncData': flush_touched(empty_sync()),
+                            'Rewards': [], 'OrbBox': _orb_box_entity(_srows)})
                 _from_slot = True
                 _rewards = []
                 for _n, _hit in _picked:
@@ -8891,17 +11436,45 @@ class H(BaseHTTPRequestHandler):
                     done = 'lv+%d -> %d (exp+%d, used %d, gold %d)' % (lv, newlv, gained, used, gold)
 
             elif path == '/api/chara/enhance-limit' and ent is not None:
+
+                # Level-cap unlock.  The counter is LimitOver - NOT Grade:
+                # Grade is the AWAKENING level (chara/upgrade raises it and
+                # resets Level to 1), while LimitOver is how many times the
+                # level cap was released.  The official chara sample carries
+                # both side by side ("Grade":2, "LimitOver":1).  The client
+                # reads LimitOver via CharaListIcon.IsLimitOverMax.
+                # Materials: game_setting.chara_limitover_cost_<rarity> nectar
+                # plus gold_<rarity> gold; the client only sends UseGold.
+                _rar = int((master_tables().get('chara') or {}).get(cid, {}).get('Rarity') or 0)
+                _maxlo = _chara_max_limitover(_rar)
+                _lo = int(ent.get('LimitOver') or 0)
                 gold = int(req.get('UseGold') or req.get('useGold') or 0)
-                if not _spend_gold(gold):
+                _need = _chara_limitover_cost(_rar)
+                _have = int((_item_entity('item.chara_limit_over') or {}).get('Count') or 0)
+                if _lo >= _maxlo:
+                    log('    chara/enhance-limit %s REFUSED: limit-over %d already max %d'
+                        % (cid, _lo, _maxlo))
+                elif _need and _have < _need:
+                    log('    chara/enhance-limit %s REFUSED: need %d item.chara_limit_over, have %d'
+                        % (cid, _need, _have))
+                elif not _spend_gold(gold):
                     log('    chara/enhance-limit refused: not enough gold')
                 else:
-                    ent['LimitOver'] = int(ent.get('LimitOver') or 0) + 1
+                    if _need:
+                        _consume_item('item.chara_limit_over', _need, strict=False)
+                    ent['LimitOver'] = _lo + 1
                     ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                    done = 'LimitOver -> %s (gold %d)' % (ent['LimitOver'], gold)
+                    done = ('LimitOver -> %s (gold %d%s)'
+                            % (ent['LimitOver'], gold,
+                               ', item.chara_limit_over x%d' % _need if _need else ''))
 
             elif path in ('/api/chara/enhance-skill', '/api/chara/enhance-skill-wild') \
                     and ent is not None:
 
+                # The request body is identical for both endpoints (the same
+                # CharaEnhanceSkillRequestData), so it is the -wild route that
+                # selects the 輝く…の黙示録 material set instead of the normal one.
+                _is_wild = path.endswith('-wild')
                 gold = int(req.get('UseGold') or req.get('useGold') or 0)
                 stype = req.get('CharaSkillLevelType')
                 if stype is None:
@@ -8910,17 +11483,38 @@ class H(BaseHTTPRequestHandler):
                     stype = int(stype)
                 except Exception:
                     stype = 0
-                if not _spend_gold(gold):
+                # Resolve which level is being bought, so the material cost can
+                # be looked up and charged together with the gold.
+                if stype == 0:
+                    _cur_lv = int(ent.get('SkillLevel') or 1)
+                elif stype in (1, 2, 3):
+                    _ex = ent.get('ExSkillLevels')
+                    if not isinstance(_ex, list) or len(_ex) < 3:
+                        _ex = [0, 0, 0]
+                    # ExSkillLevels stores 0-based progress; _skill_level_row
+                    # adds the +7 offset when looking the row up.
+                    _cur_lv = int(_ex[stype - 1] or 0)
+                elif stype == 4:
+                    _cur_lv = int(ent.get('BlessLevel') or 1)
+                else:
+                    _cur_lv = None
+                _target = (_cur_lv + 1) if isinstance(_cur_lv, int) else None
+                _mat_ok, _mat = (True, [])
+                if _target is not None:
+                    _mat_ok, _mat = _pay_skill_materials(cid, stype, _target, _is_wild)
+                if not _mat_ok:
+                    pass
+                elif not _spend_gold(gold):
                     log('    chara/enhance-skill refused: not enough gold')
                 else:
-
+                    _ms = (' + %s' % ', '.join('%s x%d' % (i, n) for i, n in _mat)) if _mat else ''
                     if stype == 0:
                         lvl = int(ent.get('SkillLevel') or 1)
                         if lvl >= _skill_cap(cid, 0):
                             log('    chara/enhance-skill: SkillLevel already at cap')
                         else:
                             ent['SkillLevel'] = lvl + 1
-                            done = 'SkillLevel %d -> %d (gold %d)' % (lvl, lvl + 1, gold)
+                            done = 'SkillLevel %d -> %d (gold %d%s)' % (lvl, lvl + 1, gold, _ms)
                     elif stype in (1, 2, 3):
                         ex = ent.get('ExSkillLevels')
                         if not isinstance(ex, list) or len(ex) < 3:
@@ -8934,8 +11528,8 @@ class H(BaseHTTPRequestHandler):
                         else:
                             ex[idx] = cur_lv + 1
                             ent['ExSkillLevels'] = ex
-                            done = 'ExSkill%d %d -> %d (gold %d)' % (
-                                stype, cur_lv, ex[idx], gold)
+                            done = 'ExSkill%d %d -> %d (gold %d%s)' % (
+                                stype, cur_lv, ex[idx], gold, _ms)
                     elif stype == 4:
 
                         bl = int(ent.get('BlessLevel') or 1)
@@ -8943,7 +11537,7 @@ class H(BaseHTTPRequestHandler):
                             log('    chara/enhance-skill: BlessLevel already at cap')
                         else:
                             ent['BlessLevel'] = bl + 1
-                            done = 'BlessLevel %d -> %d (gold %d)' % (bl, bl + 1, gold)
+                            done = 'BlessLevel %d -> %d (gold %d%s)' % (bl, bl + 1, gold, _ms)
                     else:
                         log('    chara/enhance-skill: unknown skill type %r' % stype)
                     ent['Ver'] = int(ent.get('Ver') or 0) + 1
@@ -9006,7 +11600,18 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     utype = 0
                 lv = int(req.get('Lv') or req.get('lv') or 1)
-                if not _spend_gold(gold):
+                # Ura costs three things per step (chara_ura.<rarity>.Records):
+                #   Gold                          -- the client computes it and
+                #                                    sends it as UseGold
+                #   Cost2 x item.ura_param_<Type> -- the seed for this stat
+                #   Cost  x row.ItemId            -- ura_only feed I/II/III
+                # See _ura_material_cost for the level-to-row mapping.
+                _ura_mats = _ura_material_cost(cid, utype, lv)
+                _ura_ok, _ura_paid = _pay_ura_materials(_ura_mats)
+                if not _ura_ok:
+                    log('    chara/enhance-ura REFUSED: insufficient materials for %s'
+                        % _ura_mats)
+                elif not _spend_gold(gold):
                     log('    chara/enhance-ura refused: not enough gold')
                 else:
                     ura = ent.get('Ura')
@@ -9016,7 +11621,9 @@ class H(BaseHTTPRequestHandler):
                         ura[utype] = max(int(ura[utype] or 0), lv)
                         ent['Ura'] = ura
                         ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                        done = 'Ura[%d] -> %s (gold %d)' % (utype, ura[utype], gold)
+                        _ums = (' + %s' % ', '.join('%s x%d' % (i, n)
+                                                    for i, n in _ura_paid)) if _ura_paid else ''
+                        done = 'Ura[%d] -> %s (gold %d%s)' % (utype, ura[utype], gold, _ums)
                     else:
                         log('    chara/enhance-ura: Type %r out of range' % utype)
 
@@ -9189,17 +11796,20 @@ class H(BaseHTTPRequestHandler):
                     _ok = (_pct >= 100.0) or (random.random() * 100.0 < _pct)
                 elif _step is not None:
                     _ok = _total >= _step
+                # One enhance attempt raises the level by at most ONE step.
+                # weapon_level_exp gives, per target level, the points needed
+                # (Limit / Rate) and the odds (Rate per point, capped at
+                # Limit); a success consumes exactly one step's requirement
+                # and the leftover points carry over to the next attempt.
+                # The old loop walked the whole ladder in one go, so a big
+                # material dump jumped several levels at once.
                 pool = int(recs.get('Exp') or 0) + _total
                 new_lv = lv
-
-                for _slv, _sneed, _sr, _sl in steps:
-                    if _slv <= new_lv:
-                        continue
-                    if _sneed and pool >= _sneed:
-                        pool -= _sneed
-                        new_lv = _slv
-                    else:
-                        break
+                if _ok and _step is not None:
+                    pool -= _step
+                    if pool < 0:
+                        pool = 0
+                    new_lv = lv + 1
 
                 if not _ok:
 
@@ -9242,13 +11852,39 @@ class H(BaseHTTPRequestHandler):
 
             elif path == '/api/chara/set-orb':
 
+                # The equipped orbs live on the WEAPON's own UserPossession row,
+                # as Records["Orb0"/"Orb1"/"Orb2"].  Official sample:
+                #   req  {"WeaponId":"weapon.66.1","Orbs":[100107,301309,100606]}
+                #   resp UserPossession[0] = {"Id":"weapon.66.1",
+                #        "Records":{"Lv":20,"Orb0":100107,"Orb1":301309,"Orb2":100606}}
+                # The client reads the orbs only from there, so writing separate
+                # orb_slot.N rows leaves the weapon looking unequipped.
+                _wid = (req.get('WeaponId') or req.get('weaponId')
+                        or req.get('Id') or req.get('id'))
                 orbs = req.get('Orbs') or req.get('orbs')
-                if isinstance(orbs, list):
+                if isinstance(orbs, list) and _wid:
+                    wrows = db_get('UserPossession')
+                    if not isinstance(wrows, list):
+                        wrows = []
+                    wp = None
+                    for x in wrows:
+                        if isinstance(x, dict) and x.get('Id') == _wid:
+                            wp = x
+                            break
+                    if wp is None:
+                        wp = {'UserId': user_id(), 'Id': _wid, 'ReadFlag': True,
+                              'Records': {}, 'Ver': 0}
+                        wrows.append(wp)
+                    wrecs = wp.get('Records')
+                    if not isinstance(wrecs, dict):
+                        wrecs = {}
                     for i, v in enumerate(orbs):
-                        _set_possession_count('orb_slot.%d' % i, int(v or 0), cid)
-                    if ent is not None:
-                        ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                    done = 'orbs <- %s' % orbs
+                        wrecs['Orb%d' % i] = int(v or 0)
+                    wp['Records'] = wrecs
+                    wp['Ver'] = int(wp.get('Ver') or 0) + 1
+                    db_put('UserPossession', wrows)
+                    touch(_wid, wp, 'UserPossession')
+                    done = 'orbs %s <- %s' % (_wid, orbs)
 
             elif path == '/api/chara/set-panzer' and ent is not None:
 
@@ -9370,13 +12006,16 @@ class H(BaseHTTPRequestHandler):
                         ent['Harmonia'] = kept
 
                     stacks.pop('Items', None)
+                    stacks.pop('SlotNo', None)
                     stacks.pop(slot_key, None)
                     ent['StackHarmonia'] = stacks if stacks else None
                     ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                    done = 'harmonia slot %s saved = %s' % (slot_key, val)
+                    done = 'harmonia slot %s saved = %s (Harmonia=%s)' % (
+                        slot_key, val, ent.get('Harmonia'))
 
                 elif path == '/api/chara/reset-harmonia':
                     stacks.pop('Items', None)
+                    stacks.pop('SlotNo', None)
                     stacks.pop(slot_key, None)
                     ent['StackHarmonia'] = stacks if stacks else None
                     ent['Ver'] = int(ent.get('Ver') or 0) + 1
@@ -9384,11 +12023,29 @@ class H(BaseHTTPRequestHandler):
 
                 else:
 
-                    used = _spend_use_items(req.get('UseItems') or req.get('useItems'))
-                    if used is None:
-                        log('    chara/lottery-harmonia %s REFUSED: insufficient materials' % cid)
-                        return self._send(200, flush_touched(empty_sync()))
                     num = int(req.get('Num') or req.get('num') or 1)
+                    num = max(1, num)
+
+                    # The BASE material is NOT in the request.  The client sends
+                    # UseItems:[] for a plain tuning and only fills it with the
+                    # optional 補助アイテム (item.harmonia_tuner_*), so the server
+                    # has to charge 調律譜 (item.harmonia_cost) itself -- one per
+                    # roll.  Paying only the optional items meant a player with an
+                    # empty UseItems could tune forever for free.
+                    _cost_item = 'item.harmonia_cost'
+                    _need_cost = num
+                    _have_cost = _have_item(_cost_item)
+                    if _have_cost < _need_cost:
+                        log('    chara/lottery-harmonia %s REFUSED: need %d %s, have %d'
+                            % (cid, _need_cost, _cost_item, _have_cost))
+                        return self._send(200, flush_touched(empty_sync()))
+                    _consume_item(_cost_item, _need_cost, strict=False)
+                    used = _need_cost
+                    _opt = _spend_use_items(req.get('UseItems') or req.get('useItems'))
+                    if _opt is None:
+                        log('    chara/lottery-harmonia %s REFUSED: insufficient option items' % cid)
+                        return self._send(200, flush_touched(empty_sync()))
+                    used += _opt
                     pool = []
                     for key, row in (master_tables().get('harmonia') or {}).items():
                         rid = row.get('ResourceId') or key
@@ -9407,19 +12064,66 @@ class H(BaseHTTPRequestHandler):
                         rolls.append('%s_%d' % (_strip_harmonia_prefix(pick.get('ResourceId')), lv))
                     if rolls:
 
+                        # The client correlates the pending rolls with the slot
+                        # being tuned through StackHarmonia["SlotNo"]
+                        # (CharaEntity.GetStackHarmoniaSlotNo parses that key),
+                        # and reads the rolls back from StackHarmonia["Items"]
+                        # (GetStackHarmonia splits it on ',').  Without SlotNo
+                        # the save button has nothing to attach the rolled
+                        # values to, so the tuning silently does nothing.
+                        stacks['SlotNo'] = str(slot)
                         stacks['Items'] = ','.join(rolls)
                         ent['StackHarmonia'] = stacks
                     ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                    done = 'harmonia lottery slot %s -> %s (used %d item(s))' % (
-                        slot_key, stacks.get(slot_key), used)
+                    done = 'harmonia lottery slot %s -> %d roll(s) [%s] (used %d item(s))' % (
+                        slot_key, len(rolls), stacks.get('Items'), used)
 
             elif path == '/api/chara/overlap' and ent is not None:
 
-                ent['Overlap'] = int(ent.get('Overlap') or 0) + 1
-                ent['Ver'] = int(ent.get('Ver') or 0) + 1
-
-                done = 'Overlap -> %s (ringo=%s)' % (ent['Overlap'],
-                                                    req.get('IsUseRingo'))
+                # The client only renders the ringo counts; the consumption is
+                # entirely server-side (IsUseRingo is the only flag it sends).
+                # Using the character's own ringo is what the 林檎【<job>】
+                # toggle does, so charge exactly one of it.
+                # Two ways to pay for an overlap, exactly as the panel offers:
+                #   IsUseRingo = true  -> the character's OWN ringo, i.e. one
+                #     duplicate of that character (CharaEntity.Ringo is an alias
+                #     of Count -- same field, offsets 0x50/0x54); the counter
+                #     shown is "<Count> / 1".  Costs one duplicate.
+                #   IsUseRingo = false -> the JOB ringo item
+                #     (item.ringo_<rarity>.<job>), whose price is
+                #     game_setting.overlap_common_ringo (4); the counter shown
+                #     is "<owned> / 4".  Costs that many of the item.
+                _use_ringo = bool(req.get('IsUseRingo'))
+                _ov_cur = int(ent.get('Overlap') or 0)
+                _ov_max = _ov_cur >= CHARA_MAX_OVERLAP
+                _have = int(ent.get('Count') or 0)
+                _ringo = _overlap_ringo_id(cid) if not _use_ringo else None
+                _need = _overlap_common_cost() if not _use_ringo else 1
+                if _ov_max:
+                    done = 'Overlap already MAX (%d)' % CHARA_MAX_OVERLAP
+                elif _use_ringo and _have <= 0:
+                    done = 'Overlap refused: no duplicate of %s' % cid
+                    log('    chara/overlap REFUSED: %s Count=0 (own ringo)' % cid)
+                elif not _use_ringo and not _ringo:
+                    done = 'Overlap refused: no job ringo for %s' % cid
+                elif not _use_ringo and int((_item_entity(_ringo) or {}).get('Count') or 0) < _need:
+                    done = 'Overlap refused: no %s' % _ringo
+                    log('    chara/overlap REFUSED: %s need %d have %d'
+                        % (_ringo, _need,
+                           int((_item_entity(_ringo) or {}).get('Count') or 0)))
+                else:
+                    if _use_ringo:
+                        ent['Count'] = _have - 1
+                        log('    chara/overlap %s consumed 1 duplicate (Count %d -> %d)'
+                            % (cid, _have, ent['Count']))
+                    else:
+                        _consume_item(_ringo, _need)
+                        log('    chara/overlap %s consumed %d %s' % (cid, _need, _ringo))
+                    ent['Overlap'] = _ov_cur + 1
+                    ent['Ver'] = int(ent.get('Ver') or 0) + 1
+                    done = 'Overlap %d -> %d (ringo=%s%s)' % (
+                        _ov_cur, ent['Overlap'], _use_ringo,
+                        ('' if _use_ringo else ' ' + str(_ringo)))
 
             elif path == '/api/chara/set-costume' and ent is not None:
 
@@ -9429,10 +12133,19 @@ class H(BaseHTTPRequestHandler):
                 done = 'Costume -> %s' % ent['Costume']
 
             elif path == '/api/chara/set-weapon' and ent is not None:
-                ent['Weapon'] = {'WeaponId': req.get('WeaponId') or req.get('weaponId'),
-                                 'WeaponStyleId': req.get('WeaponStyleId') or req.get('weaponStyleId')}
+                # CharaEntity carries the weapon in TWO independent String
+                # fields, not one object:
+                #   get_Weapon() -> [chara+152]   (SetWeapon arg 1, WeaponId)
+                #   get_WS()     -> [chara+160]   (SetWeapon arg 2, WeaponStyleId)
+                # Writing a nested object made the client's JsonReader fail on
+                # every login ("Unexpected character at Path '[39].Weapon'") and
+                # the game could not start at all.
+                ent['Weapon'] = (req.get('WeaponId') or req.get('weaponId')
+                                 or ent.get('Weapon') or None)
+                ent['WS'] = (req.get('WeaponStyleId') or req.get('weaponStyleId')
+                             or ent.get('WS') or None)
                 ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                done = 'Weapon -> %s' % ent['Weapon']
+                done = 'Weapon -> %s / WS -> %s' % (ent['Weapon'], ent['WS'])
 
             elif path == '/api/chara/set-prefs' and ent is not None:
 
@@ -9465,7 +12178,15 @@ class H(BaseHTTPRequestHandler):
             elif path == '/api/chara/upgrade' and ent is not None:
 
                 gold = int(req.get('UseGold') or req.get('useGold') or 0)
-                if not _spend_gold(gold):
+                # Awakening charges the gold the client computed plus the
+                # items listed in chara_awaken.<charaId>.Records[grade].
+                _aw_grade = int(ent.get('Grade') or 0)
+                _aw_mats = _awaken_material_cost(cid, _aw_grade)
+                _aw_ok, _aw_paid = _pay_materials(_aw_mats)
+                if not _aw_ok:
+                    log('    chara/upgrade REFUSED: insufficient materials for %s'
+                        % _aw_mats)
+                elif not _spend_gold(gold):
                     log('    chara/upgrade refused: not enough gold')
                 else:
                     g = int(ent.get('Grade') or 0)
@@ -9473,8 +12194,10 @@ class H(BaseHTTPRequestHandler):
                     ent['Level'] = 1
                     ent['Experience'] = 0
                     ent['Ver'] = int(ent.get('Ver') or 0) + 1
-                    done = 'Grade %d -> %d, Level reset to 1 (gold %d)' % (
-                        g, g + 1, gold)
+                    _aws = (' + %s' % ', '.join('%s x%d' % (i, n)
+                                                for i, n in _aw_paid)) if _aw_paid else ''
+                    done = 'Grade %d -> %d, Level reset to 1 (gold %d%s)' % (
+                        g, g + 1, gold, _aws)
 
             if ent is not None:
                 db_put('Chara', chara_rows)
@@ -9547,7 +12270,137 @@ class H(BaseHTTPRequestHandler):
                 sync['Characters'] = [ent]
             return self._send(200, sync)
 
+        if path == '/api/user-possession/read-shampoo':
+
+            # 隠れシャンプーくん: the player clicks one of ten hidden objects.
+            # The client posts {"Id":"D"} then immediately calls
+            # UserPossessionFacade.GetProgressHideShampoo() to render
+            #   （発見数：{found} / {total}）.
+            #
+            # GetProgressHideShampoo reads UserPossession['hide_shampoo'].Records.Count,
+            # and UserPossessionConst declares exactly ten ids (string[10]):
+            #   A B C D E F G H I J
+            #
+            # This must come BEFORE the generic '/api/user-possession/' catch-all below;
+            # without it that catch-all treated "D" as an entity id and created a junk
+            # row named "D", so the counter stayed 0/10 and the find was never recorded.
+            _hreq = _req_json(body) or {}
+            _hid = str(_hreq.get('Id') or _hreq.get('id') or '')
+            if _hid and _hid in 'ABCDEFGHIJ' and len(_hid) == 1:
+                _hrows = db_get('UserPossession')
+                if not isinstance(_hrows, list):
+                    _hrows = []
+                _hs = None
+                for _r in _hrows:
+                    if isinstance(_r, dict) and _r.get('Id') == 'hide_shampoo':
+                        _hs = _r
+                        break
+                if _hs is None:
+                    _hs = {'UserId': user_id(), 'Id': 'hide_shampoo',
+                           'ReadFlag': False, 'Records': {}, 'Ver': 0}
+                    _hrows.append(_hs)
+                _hrec = _hs.get('Records')
+                if not isinstance(_hrec, dict):
+                    _hrec = {}
+                if _hrec.get(_hid) is None:
+                    _hrec[_hid] = 1
+                    _hs['Records'] = _hrec
+                    _hs['Ver'] = int(_hs.get('Ver') or 0) + 1
+                    db_put('UserPossession', _hrows)
+                    touch('hide_shampoo', _hs, 'UserPossession')
+                # Ten hidden Shampoo-kun objects (ids A..J).  Each maps to a profile
+                # icon via UserPossessionConst.GetHideShampooRewardId:
+                #   A/B -> profile_icon.step_0079_01/02   C/D -> step_0090_01/02
+                #   E/F -> profile_icon.step_0094_01/02   G/H -> step_0123_01/02
+                #   I/J -> profile_icon.step_0125_01/02
+                # UserFacade.HasItem() = GetItem(Item table) + Count > 0, so the
+                # unlock has to be written into Item to make the icon selectable.
+                _HSREW = {
+                    'A': 'profile_icon.step_0079_01',
+                    'B': 'profile_icon.step_0079_02',
+                    'C': 'profile_icon.step_0090_01',
+                    'D': 'profile_icon.step_0090_02',
+                    'E': 'profile_icon.step_0094_01',
+                    'F': 'profile_icon.step_0094_02',
+                    'G': 'profile_icon.step_0123_01',
+                    'H': 'profile_icon.step_0123_02',
+                    'I': 'profile_icon.step_0125_01',
+                    'J': 'profile_icon.step_0125_02',
+                }
+                _rew = _HSREW.get(_hid)
+                if _rew:
+                    _irows = db_get('Item')
+                    if not isinstance(_irows, list):
+                        _irows = []
+                    _ihit = None
+                    for _ir in _irows:
+                        if isinstance(_ir, dict) and _ir.get('Id') == _rew:
+                            _ihit = _ir
+                            break
+                    if _ihit is None:
+                        _ihit = {'UserId': user_id(), 'Id': _rew, 'Count': 1,
+                                 'Records': None, 'IsRead': False, 'Ver': 1}
+                        _irows.append(_ihit)
+                    else:
+                        _ihit['Count'] = int(_ihit.get('Count') or 0) + 1
+                        _ihit['Ver'] = int(_ihit.get('Ver') or 0) + 1
+                    db_put('Item', _irows)
+                    touch(_rew, _ihit, 'Items')
+                    log('    read-shampoo %s -> unlocked %s' % (_hid, _rew))
+                log('    read-shampoo %s -> %d/10 found'
+                    % (_hid, len(_hrec)))
+            else:
+                log('    read-shampoo ignored: bad id %r' % (_hid,))
+            return self._send(200, flush_touched(empty_sync()))
+
+        if path == '/api/user-possession/read-synopsis':
+            # Opening a locked entry in the god reference book (EnemyReference ->
+            # SynopsisPopup) marks that artwork as read.  The client asks for the
+            # profile and the slot number and nothing else; the row it expects
+            # back was taken from the live service:
+            #
+            #   POST {"ProfileId":"enemy.god.profile.23","No":1}
+            #   -> UserPossession row
+            #      {"Id":"synopsis.enemy.god.profile.23.1",
+            #       "ReadFlag":true,"Records":null,"Ver":1}
+            #
+            # Without this the request fell through to the generic read stub, so
+            # the unlock was never persisted and the entry re-locked itself as
+            # soon as the page was reopened.
+            try:
+                req = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                req = {}
+            prof = str(req.get('ProfileId') or req.get('profileId') or '')
+            try:
+                num = int(req.get('No') if req.get('No') is not None
+                          else req.get('no') or 0)
+            except Exception:
+                num = 0
+            if prof and num:
+                sid = 'synopsis.%s.%d' % (prof, num)
+                rows = db_get('UserPossession')
+                if not isinstance(rows, list):
+                    rows = []
+                hit = None
+                for x in rows:
+                    if isinstance(x, dict) and x.get('Id') == sid:
+                        hit = x
+                        break
+                if hit is None:
+                    hit = {'UserId': user_id(), 'Id': sid, 'ReadFlag': True,
+                           'Records': None, 'Ver': 1}
+                    rows.append(hit)
+                else:
+                    hit['ReadFlag'] = True
+                    hit['Ver'] = int(hit.get('Ver') or 0) + 1
+                db_put('UserPossession', rows)
+                touch(sid, hit, 'UserPossession')
+                log('    read-synopsis -> %s' % sid)
+            return self._send(200, flush_touched(empty_sync()))
+
         if path in ('/api/user/recover-item', '/api/user/recover-jewel'):
+
 
             try:
                 req = json.loads(body.decode('utf-8')) if body else {}
@@ -9555,7 +12408,36 @@ class H(BaseHTTPRequestHandler):
                 req = {}
             uses = parse_use_items(req)
             if path.endswith('recover-jewel'):
-                recover_stamina('item.jewel_free', 50)
+
+                # Jewel recovery: the body carries a single UseItem whose
+                # Count is the TOTAL JEWELS to spend, already multiplied by the
+                # client (UserConst's unit price is 100 per recovery, and the
+                # popup does count * 100 before serialising).  One recovery
+                # restores the rank's natural limit, so the number of
+                # recoveries is Count // 100 and the stamina gained is that many
+                # times the limit.  Jewels must actually be spent - the old code
+                # hardcoded a 50-point gain and consumed nothing.
+                _jr = req.get('UseItem') or req.get('useItem') or {}
+                try:
+                    _spend = int((_jr or {}).get('Count') or 0)
+                except Exception:
+                    _spend = 0
+                if _spend <= 0:
+                    log('    recover-jewel: no UseItem.Count in body %r' % (req,))
+                    return self._send(200, flush_touched(empty_sync()))
+                _per = JEWEL_STAMINA_COST
+                _times = max(1, _spend // _per) if _per else 1
+                _need_jewel = _times * _per
+                _src = _row_id('item.jewel')
+                if _have_item(_src) < _need_jewel:
+                    log('    recover-jewel REFUSED: need %d %s, have %d'
+                        % (_need_jewel, _src, _have_item(_src)))
+                    return self._send(200, flush_touched(empty_sync()))
+                _gain = _stamina_recover_limit() * _times
+                _consume_item(_src, _need_jewel, strict=False)
+                recover_stamina(_src, _gain)
+                log('    recover-jewel: %d jewel(s) x%d -> +%d stamina'
+                    % (_need_jewel, _times, _gain))
                 return self._send(200, flush_touched(empty_sync()))
             if not uses:
                 log('    recover-item: no UseItems in body %r' % (req,))
@@ -9686,6 +12568,50 @@ class H(BaseHTTPRequestHandler):
                 log('    user-possession/add-records %s +%d -> %d record(s)'
                     % (pid, len(add), len(cur)))
                 return self._send(200, flush_touched(empty_sync()))
+
+            if path.endswith('/set-clear-records'):
+                # The client sends the WHOLE record set it wants to end up with
+                # (e.g. orb_locks -> {"200909":1,"201002":1}).  Semantics are
+                # therefore REPLACE, not merge: an empty dict is a legitimate
+                # "clear every lock", and must actually empty the row.  Falling
+                # through to the generic branch below would only flip ReadFlag and
+                # silently drop the payload -- the client then retries forever
+                # because the locks never reach the state it asked for.
+                pid = (req.get('UserPossessionId') or req.get('userPossessionId')
+                       or req.get('Id'))
+                recs = req.get('Records')
+                if not isinstance(recs, dict):
+                    recs = {}
+                if pid:
+                    rows = db_get('UserPossession')
+                    if not isinstance(rows, list):
+                        rows = []
+                    hit = None
+                    for r in rows:
+                        if isinstance(r, dict) and r.get('Id') == pid:
+                            hit = r
+                            break
+                    if hit is None:
+                        hit = {'UserId': user_id(), 'Id': pid, 'ReadFlag': False,
+                               'Records': None, 'Ver': 0}
+                        rows.append(hit)
+                    # Normalise the values to ints: the client compares them
+                    # numerically and a string would never match.
+                    clean = {}
+                    for k, v in recs.items():
+                        try:
+                            clean[str(k)] = int(v or 0)
+                        except Exception:
+                            clean[str(k)] = 0
+                    hit['Records'] = clean if clean else None
+                    hit['ReadFlag'] = bool(hit.get('ReadFlag', False))
+                    hit['Ver'] = int(hit.get('Ver') or 0) + 1
+                    db_put('UserPossession', rows)
+                    touch(pid, hit, 'UserPossession')
+                    log('    user-possession/set-clear-records %s -> %d record(s)'
+                        % (pid, len(clean)))
+                    return self._send(200, flush_touched(empty_sync()))
+
             pid = (req.get('UserPossessionId') or req.get('userPossessionId')
                    or req.get('Id'))
             ent = mark_possession_read(pid)
@@ -9708,22 +12634,62 @@ class H(BaseHTTPRequestHandler):
 
             quest_id = req.get('Id') or req.get('id')
 
+            # Skipping pays from TODAY's best score (tutorial page 7/10:
+            # 「表示されている最高スコア基準でスキップが可能」).  Rolling over
+            # first keeps a stale score from yesterday out of the payout, and
+            # the same incremental rule as /end applies so a skip cannot
+            # re-collect tiers that were already paid today.
+            rewards = []
             _bb_score = 0
+            _bb_rows = db_get('BigBattle')
+            if not isinstance(_bb_rows, list):
+                _bb_rows = []
+            _hit = None
+            for _x in _bb_rows:
+                if isinstance(_x, dict) and _x.get('Id') == quest_id:
+                    _hit = _x
+                    break
             try:
-                for _x in (db_get('BigBattle') or []):
-                    if isinstance(_x, dict) and _x.get('Id') == quest_id:
-                        _bb_score = int(_x.get('Score') or 0)
-                        break
-            except Exception:
-                _bb_score = 0
-            rewards = _rank_reward_rows(
-                'rank_reward.%s' % quest_id, _bb_score, key='Rank')
+                if _hit is None:
+                    _hit = {'UserId': user_id(), 'Id': quest_id, 'Score': 0,
+                            'Num': 0, 'LastAt': _now_iso(), 'ResetAt': None,
+                            'Logs': {}, 'Ver': 0}
+                    _bb_rows.append(_hit)
+                if _big_battle_daily(_hit):
+                    db_put('BigBattle', _bb_rows)
+                _bb_score = int(_hit.get('Score') or 0)
+                _rrid = 'rank_reward.%s' % quest_id
+                _new_total = _rank_reward_total(_rrid, _bb_score)
+                _changed = False
+                for _rid in sorted(_new_total):
+                    _ck = 'C_' + _rid.replace('.', '_')[:44]
+                    try:
+                        _paid = int((_hit.get('Logs') or {}).get(_ck) or 0)
+                    except Exception:
+                        _paid = 0
+                    _give = int(_new_total[_rid]) - _paid
+                    if _give <= 0:
+                        continue
+                    _grant_reward(_rid, _give)
+                    rewards.append({'RewardType': _reward_type_of(_rid),
+                                    'RewardItemId': _rid,
+                                    'RewardParam': None,
+                                    'RewardItemCount': _give,
+                                    'CelebRate': 0, 'EvDrop': 0, 'CType': 0,
+                                    'GroupNo': 0, 'GroupRewards': None})
+                    _hit.setdefault('Logs', {})[_ck] = str(int(_new_total[_rid]))
+                    _changed = True
+                if _changed:
+                    _hit['Ver'] = int(_hit.get('Ver') or 0) + 1
+                    db_put('BigBattle', _bb_rows)
+                    touch(quest_id, _hit, 'BigBattles')
+            except Exception as _e:
+                log('    big-battle/skip payout failed: %s' % _e)
             if not rewards:
+                rewards = []
 
-                rewards = merge_received_rewards(
-                    roll_quest_rewards(quest_id, 0, not _quest_cleared(quest_id)))
-
-            log('    big-battle/skip %s -> %d reward(s)' % (quest_id, len(rewards)))
+            log('    big-battle/skip %s (score %d) -> %d reward(s)'
+                % (quest_id, _bb_score, len(rewards)))
             return self._send(200, {'SyncData': flush_touched(empty_sync()),
                                     'ReceivedRewards': rewards})
 
@@ -9776,6 +12742,12 @@ class H(BaseHTTPRequestHandler):
 
         if path == '/api/quest/end':
 
+            # Clear the per-request marker first: _orb_box_add() sets it whenever
+            # this battle actually dropped an orb box, and the response below
+            # reports the entity only while it is set.  Without this the flag
+            # would leak into a later request and report a stale box.
+            _touched_flag().pop('orb_box_granted', None)
+
             _mission_progress('any_battle')
 
             try:
@@ -9812,6 +12784,18 @@ class H(BaseHTTPRequestHandler):
                         % (quest_id, difficulty, before_stamina, cost))
                 else:
                     rewards = roll_quest_rewards(quest_id, difficulty, first_time)
+
+                    _bp = _breaking_parts_rewards(
+                        quest_id, difficulty, req.get('BrokenPartIds'))
+                    if _bp:
+                        rewards = _insert_breaking_parts(rewards, _bp)
+                        log('    quest/end %s -> %d breaking-part reward(s)'
+                            % (quest_id, len(_bp)))
+                    # RELIC HUNT: the gauge was checked BEFORE the roll so a
+                    # full gauge doubles this clear's oopart drops.
+                    if _relic_dawn_double(quest_id):
+                        rewards = _relic_duplicate_rewards(rewards)
+                        log('    quest/end RELIC HUNT dawn break -> double oopart drop')
                     rewards = merge_received_rewards(rewards)
                     exp_gain = _quest_exp_reward(quest_id, difficulty)
                     after_rank, after_exp = _add_exp(exp_gain)
@@ -9821,11 +12805,16 @@ class H(BaseHTTPRequestHandler):
                         after_stamina = int(_u_now.get('Stamina') or after_stamina)
                     except Exception:
                         pass
-                    record_quest_clear(quest_id, difficulty)
+                    record_quest_clear(
+                        quest_id, difficulty,
+                        _drop_up_points(req.get('EditMyCharaIds')
+                                        or req.get('AliveCharaIds') or []))
 
                     _add_enemy_kills(req.get('EnemyKills'))
 
                     _sync_god_lyrics(req.get('EnemyKills'))
+                    _merge_god_lyric_bits(req.get('EnemyKills'),
+                                           req.get('SungGodLyricBitFlag'))
 
                     _angel_rows = _sync_angel_lyrics(req.get('LyricCharaIds'), 1)
                     if _angel_rows:
@@ -9839,6 +12828,14 @@ class H(BaseHTTPRequestHandler):
                    before_exp, after_exp, before_stamina, after_stamina,
                    ' (first clear)' if first_time else ''))
 
+            # RELIC HUNT: advance the Dawn Break gauge and report the change.
+            # Non-RELIC quests keep the previous zero/zero behaviour.
+            _dawn_before, _dawn_after = 0, 0
+            if _relic_is_hunt(quest_id) and result == 'win':
+                _dawn_before, _dawn_after, _dawn_broke = _relic_dawn_step(quest_id)
+                log('    quest/end RELIC HUNT dawn break %s: %d -> %d%s'
+                    % (quest_id, _dawn_before, _dawn_after,
+                       ' (gauge was full)' if _dawn_broke else ''))
             _replay_mode = (os.environ.get('ANGELICA_REPLAY') or '').strip()
             payload = {'SyncData': _oopart_pluses_sync(flush_touched(empty_sync())),
                        'ReceivedRewards': rewards,
@@ -9851,8 +12848,14 @@ class H(BaseHTTPRequestHandler):
                        'AfterAchivement': after_achivement,
                        'CurrentAchivement': after_achivement,
                        'IsOverItem': False,
-                       'BeforeDawnBreak': 0, 'AfterDawnBreak': 0,
-                       'OrbBox': None}
+                       'BeforeDawnBreak': _dawn_before, 'AfterDawnBreak': _dawn_after,
+                       # quest/end CAN drop orb boxes: quest_reward.orb_<N> carries
+                       # item.box.orb.* rows with RewardType=3.  The client learns
+                       # about the drop ONLY from this member, so report the entity
+                       # when _orb_box_add() ran during this request -- exactly as
+                       # quest/skip does below.
+                       'OrbBox': (_orb_box_entity()
+                                  if _touched_flag().get('orb_box_granted') else None)}
             if _replay_mode:
                 payload = _apply_truth_replay(payload, _replay_mode)
             return self._send(200, payload)
@@ -9912,15 +12915,40 @@ class H(BaseHTTPRequestHandler):
                                          first_time and n == 0)
                 rewards.extend(got)
 
+
+            _bp = []
+            for _rn in range(runs):
+                _bp.extend(_breaking_parts_rewards(quest_id, difficulty,
+                                                  req.get('BrokenPartIds')))
+            if _bp:
+                rewards = _insert_breaking_parts(rewards, _bp)
+                log('    quest/skip %s -> %d breaking-part reward(s)'
+                    % (quest_id, len(_bp)))
             rewards = merge_received_rewards(rewards)
             exp_gain = _quest_exp_reward(quest_id, difficulty) * runs
             after_rank, after_exp = _add_exp(exp_gain)
+            _skip_party = []
+            try:
+                for _t in (db_get('Team') or []):
+                    if isinstance(_t, dict) and int(_t.get('TeamNo') or -1) == 0:
+                        _skip_party = (_t.get('CharaIds') or [])
+                        break
+            except Exception:
+                _skip_party = []
+            _skip_du = _drop_up_points(_skip_party)
             for _ in range(runs):
-                record_quest_clear(quest_id, difficulty)
+                record_quest_clear(quest_id, difficulty, _skip_du)
             after_achivement = _mission_achievement(quest_id)
             if tickets:
                 _consume_item('item.skip_ticket_A', tickets, strict=False)
 
+            # Skipping still consumes the map, so the kills and the sung lyric
+            # bits have to be credited here too.  Note skip carries no
+            # SungGodLyricBitFlag of its own -- only EnemyKills.
+            _add_enemy_kills(req.get('EnemyKills'))
+            _sync_god_lyrics(req.get('EnemyKills'))
+            _advance_god_lyrics_for_skip(req.get('EnemyKills'),
+                                         req.get('SkipTicketNum'))
             _angel_rows = _sync_angel_lyrics(req.get('LyricCharaIds'), runs)
             log('    quest/skip %s d%d -> %d reward(s), rank %d->%d exp %d->%d%s'
                 % (quest_id, difficulty, len(rewards), before_rank, after_rank,
@@ -9988,9 +13016,13 @@ class H(BaseHTTPRequestHandler):
 
             _bp = _banner_reward_map(gacha_id)
             _bpool, _bgids = (_bp if isinstance(_bp, tuple) else ({}, {}))
+            # The rates must come from THIS play's own banner: different
+            # banners share lottery ids but carry different weights.
+            _bhold = _banner_hold_id(gacha_id)
             rewards = roll_gacha(count, main_lot, last_lot,
                                  up_ids=_banner_up_ids(gacha_id),
-                                 pools=_bpool or None)
+                                 pools=_bpool or None,
+                                 play_id=gacha_id, banner_id=_bhold)
             log('    gacha %s -> %d pull(s), paid=%s, main=%s last=%s, %s'
                 % (gacha_id, count, paid, main_lot, last_lot,
                    ', '.join('%s(%d)' % (r['RewardId'], r['Rarity']) for r in rewards[:5])))
@@ -10058,18 +13090,23 @@ class H(BaseHTTPRequestHandler):
                 if _cost and _spend_stamina(_cost) is None:
 
                     log('    multi-team/end %s REFUSED: not enough stamina (%d)' % (_mt, _cost))
-                    return self._send(200, _end_quest_response(
+                    # The stamina-refused path also sends a battle-end payload, so it
+                    # needs the same SyncData treatment as the main return below.
+                    _mt_tail = _end_quest_response(
                         received=None,
                         living=[],
                         result=None,
                         before_rank=_rank_exp_state()[0], after_rank=_rank_exp_state()[0],
                         before_exp=_rank_exp_state()[1], after_exp=_rank_exp_state()[1],
                         before_stamina=int((db_get('User') or {}).get('Stamina') or 0),
-                        after_stamina=int((db_get('User') or {}).get('Stamina') or 0)))
+                        after_stamina=int((db_get('User') or {}).get('Stamina') or 0))
+                    _mt_tail['SyncData'] = flush_touched(empty_sync()) or empty_sync()
+                    return self._send(200, _mt_tail)
                 _ar, _ae = _add_exp(_quest_exp_reward(_mt, 0))
             log('    multi-team/end %s stage=%s -> %d reward(s)'
                 % (_mt, req.get('StageNo'), len(_rewards)))
-            return self._send(200, {'SyncData': flush_touched(empty_sync()),
+            return self._send(200, {'SyncData': (flush_touched(empty_sync())
+                                          or empty_sync()),
                                    **_end_quest_response(received=_rewards,
                                                          living=_alive,
 
@@ -10103,15 +13140,22 @@ class H(BaseHTTPRequestHandler):
                 _dg_alive = [c for c in (_eq.get('AliveCharaIds') or [])
                              if isinstance(c, str)]
                 _dg_row = (master_tables().get('demigod') or {}).get(mid) or {}
-                for _frag in (_dg_row.get('RewardIds') or []):
-                    if not _frag:
-                        continue
-                    _before = _item_count_of(_frag)
-                    _grant_reward(_frag, 1)
-                    demigod_rewards.append({'RewardId': _frag,
-                                            'AfterCount': _item_count_of(_frag),
-                                            'AddCount': 1,
-                                            'IsOver': False})
+                _dg_win = str(_eq.get('Result') or '').lower() in ('win', 'clear', '1', 'true')
+                # The artifact is a CLEAR reward.  Granting it on enter (or on a
+                # loss) let a player collect the season's only artifact by simply
+                # losing -- it used to be handed out unconditionally right here.
+                if _dg_win:
+                    for _frag in (_dg_row.get('RewardIds') or []):
+                        if not _frag:
+                            continue
+                        _before = _item_count_of(_frag)
+                        _grant_reward(_frag, 1)
+                        demigod_rewards.append({'RewardId': _frag,
+                                                'AfterCount': _item_count_of(_frag),
+                                                'AddCount': 1,
+                                                'IsOver': False})
+                if _dg_win and lv > 0:
+                    _demigod_advance(mid, lv, _dg_row)
                 log('    demigod/end %s lv=%d -> settled, %d reward(s)'
                     % (mid, lv, len(demigod_rewards)))
             else:
@@ -10146,6 +13190,21 @@ class H(BaseHTTPRequestHandler):
                 score = int(req.get('Score') or 0)
             except Exception:
                 score = 0
+            # The nested EndQuest block carries the party that survived and the
+            # enemies killed; the response has to echo LivingCharaIds from it and
+            # fold the kills into UserPossession (the official sample shows the
+            # enemy_kill_count record updated in the same SyncData).
+            _eq = req.get('EndQuest') if isinstance(req.get('EndQuest'), dict) else {}
+            _alive = _eq.get('AliveCharaIds')
+            if not isinstance(_alive, list):
+                _alive = req.get('AliveCharaIds')
+            if not isinstance(_alive, list):
+                _alive = []
+            # Logs travels verbatim: the official record keeps the client's own
+            # short keys (P/S/B/E/A ...) unchanged.
+            _logs = req.get('Logs')
+            if not isinstance(_logs, dict):
+                _logs = {}
 
             try:
                 rows = db_get('BigBattle')
@@ -10160,22 +13219,67 @@ class H(BaseHTTPRequestHandler):
                     hit = {'UserId': user_id(), 'Id': bid, 'Score': 0, 'Num': 0,
                            'LastAt': _now_iso(), 'ResetAt': None, 'Logs': {}, 'Ver': 0}
                     rows.append(hit)
+
+                # New game day (05:00 JST): the previous day's score, its
+                # attempt counter and its payout ledger are all dropped.
+                _big_battle_daily(hit, bid)
+
                 if score > int(hit.get('Score') or 0):
                     hit['Score'] = score
                 hit['Num'] = int(hit.get('Num') or 0) + 1
                 hit['LastAt'] = _now_iso()
                 if not isinstance(hit.get('Logs'), dict):
                     hit['Logs'] = {}
+                for _lk, _lv in _logs.items():
+                    hit['Logs'][str(_lk)] = _lv if isinstance(_lv, str) else str(_lv)
                 hit['Ver'] = int(hit.get('Ver') or 0) + 1
+
+                # Pay ONLY the tiers this run newly reached.  The previous
+                # implementation granted every tier below the stored best on
+                # every single run, so one high score paid 102+ shampoo forever
+                # (up to 46 runs a day).  Each reward id keeps how much the
+                # current day has already paid in Logs['C_<id>']; the difference
+                # is what this run owes.
+                _rrid = 'rank_reward.%s' % bid
+                _new_total = _rank_reward_total(_rrid, int(hit.get('Score') or 0))
+                rewards = []
+                for _rid in sorted(_new_total):
+                    _ck = 'C_' + _rid.replace('.', '_')[:44]
+                    try:
+                        _paid = int(hit['Logs'].get(_ck) or 0)
+                    except Exception:
+                        _paid = 0
+                    _give = int(_new_total[_rid]) - _paid
+                    if _give <= 0:
+                        continue
+                    _grant_reward(_rid, _give)
+                    rewards.append({'RewardType': _reward_type_of(_rid),
+                                    'RewardItemId': _rid,
+                                    'RewardParam': None,
+                                    'RewardItemCount': _give,
+                                    'CelebRate': 0, 'EvDrop': 0, 'CType': 0,
+                                    'GroupNo': 0, 'GroupRewards': None})
+                    hit['Logs'][_ck] = str(int(_new_total[_rid]))
                 db_put('BigBattle', rows)
 
                 touch(bid, hit, 'BigBattles')
             except Exception as e:
                 log('    big-battle/end save failed:', e)
-            log('    big-battle/end %s score=%d' % (bid, score))
+                rewards = []
+
+            try:
+                _add_enemy_kills(_eq.get('EnemyKills'))
+                _sync_god_lyrics(_eq.get('EnemyKills'))
+                _merge_god_lyric_bits(_eq.get('EnemyKills'),
+                                       _eq.get('SungGodLyricBitFlag'))
+            except Exception as e:
+                log('    big-battle/end kills failed:', e)
+
+            log('    big-battle/end %s score=%d -> %d reward(s), %d alive, logs=%d'
+                % (bid, score, len(rewards), len(_alive), len(_logs)))
             payload = {'SyncData': flush_touched(empty_sync()),
-                       'ReceivedRewards': [],
-                       'LivingCharaIds': [],
+                       'ReceivedRewards': rewards,
+                       'LivingCharaIds': _alive,
                        'QuestResult': None,
                        'BeforeRank': before_rank, 'AfterRank': before_rank,
                        'BeforeExp': before_exp, 'AfterExp': before_exp,
@@ -10732,15 +13836,76 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self): self._handle_safe('POST')
     def do_PUT(self):  self._handle_safe('PUT')
 
+def _kill_port_owner(port):
+
+    # Windows-only helper: find the PID listening on `port` and terminate it.
+    # Used to reclaim 18080 from a server instance left over from a previous
+    # run, so a restart always picks up the current server.py.  Only stdlib
+    # modules already imported by this file are used (no subprocess import).
+    try:
+        txt = os.popen('netstat -ano -p TCP').read()
+    except Exception as e:
+        log('    _kill_port_owner: netstat failed (%s)' % e)
+        return False
+    pids = set()
+    for line in txt.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0] != 'TCP':
+            continue
+        if not parts[1].endswith(':%d' % port) or parts[3] != 'LISTENING':
+            continue
+        try:
+            pids.add(int(parts[4]))
+        except Exception:
+            continue
+    if not pids:
+        log('    _kill_port_owner: nobody is listening on %d after all' % port)
+        return False
+    ok = False
+    for pid in sorted(pids):
+        if pid == os.getpid():
+            continue
+        try:
+            os.popen('taskkill /F /PID %d' % pid).read()
+            log('    _kill_port_owner: killed pid %d on port %d' % (pid, port))
+            ok = True
+        except Exception as e:
+            log('    _kill_port_owner: taskkill %d failed (%s)' % (pid, e))
+    return ok
+
 def main():
     log('=' * 70)
     log('AngelServer -- local offline game server')
+    log('  patch level:', PATCH_LEVEL, '(base md5 %s)' % PATCH_BASE[:8])
     log('  db   :', DB)
     log('  port :', PORT)
     seeded = seed()
     log('  seeded %d tables from captured/' % seeded)
     ensure_jewels()
     _seed_unreachable_missions()
+    # Starter decoration (furniture / backgrounds / clocks / home effects).
+    # The client also triggers this through /api/present/campaign on login, but
+    # running it here as well means a freshly created save already owns the set
+    # the moment the server comes up.
+    _deco = grant_initial_furnitures()
+    if _deco:
+        log('  starter decoration: granted %d row(s)' % _deco)
+    _eq = grant_starter_equipment()
+    if _eq:
+        log('  starter equipment: %d row(s)' % _eq)
+    # Premium / special mission passes cannot be bought offline (the DMM
+    # payment SDK bypasses UnityWebRequest), so hand them over at startup
+    # instead -- see grant_mission_passes().
+    _mp = grant_mission_passes()
+    if _mp:
+        log('  mission passes: %d event(s) unlocked' % _mp)
+    _ep = grant_ending_presents_at_boot()
+    if _ep:
+        log('  ending presents: %d row(s)' % _ep)
+    # Idempotent: gives a valid player card to saves made before the gacha
+    # hook existed (or by an older build).
+    if seed_profile_card():
+        log('  player card initialised')
     log('  read endpoints: %d' % len(READ_API))
     log('  CDN catalog   :', CATALOG_BIN if CATALOG_BIN else '(none)')
     log('  CDN bundles   : %d indexed' % len(BUNDLES))
@@ -10751,10 +13916,25 @@ def main():
     try:
         srv = _NoReuse(('127.0.0.1', PORT), H)
     except OSError as e:
-        log('FATAL: cannot bind port %d (%s).' % (PORT, e))
-        log('Another server is already using it -- kill that process first,')
-        log('otherwise clients keep talking to the OLD code.')
-        raise SystemExit(2)
+
+        # A previous server still holds the port.  That is the single most
+        # confusing failure mode in this package: the new process dies, the
+        # window closes, and the client happily keeps talking to the OLD code
+        # so every fix looks like it did nothing.  Reclaim the port ourselves
+        # instead of asking the player to hunt for a stale process.
+        log('port %d is busy (%s) -- stopping the previous server' % (PORT, e))
+        if _kill_port_owner(PORT):
+            time.sleep(1.0)
+            try:
+                srv = _NoReuse(('127.0.0.1', PORT), H)
+            except OSError as e2:
+                log('FATAL: still cannot bind port %d (%s).' % (PORT, e2))
+                log('Another program (not a previous AngelServer) owns the port.')
+                raise SystemExit(2)
+        else:
+            log('FATAL: cannot bind port %d (%s).' % (PORT, e))
+            log('Another program owns the port and could not be stopped.')
+            raise SystemExit(2)
     log('listening on http://127.0.0.1:%d' % PORT)
 
     try:
@@ -10774,6 +13954,21 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         log('shutting down')
+
+
+def _print_patch_info():
+    """--patch-info: print the patch level and exit (touches nothing)."""
+    print("PATCH_LEVEL : %s" % PATCH_LEVEL)
+    print("PATCH_BASE  : %s" % PATCH_BASE)
+    print("PATCH_DATE  : %s" % PATCH_DATE)
+    print("notes:")
+    for _n in PATCH_NOTES:
+        print("  - %s" % _n)
+    return 0
+
+
+if "--patch-info" in sys.argv:
+    sys.exit(_print_patch_info())
 
 if __name__ == '__main__':
     main()
